@@ -733,6 +733,13 @@ class TestResolveProviderLaunchModel:
     def test_no_models_and_no_override_is_none(self):
         assert db_mod.resolve_provider_launch_model(None, {}) is None
 
+    def test_always_select_picks_opus_instead_of_default(self):
+        # always_select: pick a tier even when opus is offered (no pinned alias to fall back on).
+        models = {"opus": "claude-opus-4-8", "sonnet": "claude-sonnet-5"}
+        assert db_mod.resolve_provider_launch_model(None, models, always_select=True) == (
+            "claude-opus-4-8"
+        )
+
 
 class TestProviderServicePagination:
     """The listing is paginated; ignoring next_page_token hid services on later pages entirely."""

@@ -958,7 +958,7 @@ class TestClaudeModelFlag:
         assert "ignored" not in _strip_ansi(result.output)
 
     def test_relayed_provider_without_model_forwards_nothing(self, monkeypatch):
-        # No --model on a relayed launch: nothing to forward.
+        # No --model on an allow_all relay: nothing to forward.
         result, _, mock_launch = self._provider_launch(
             monkeypatch,
             ["claude", "--provider", "cat.schema.svc"],
@@ -967,6 +967,38 @@ class TestClaudeModelFlag:
         )
         assert result.exit_code == 0, result.output
         assert mock_launch.call_args.args[2] == []
+
+    def test_relayed_allowlist_resolves_model_to_declared_target(self, monkeypatch):
+        # Curated relay: --model resolves to the declared id, which is what gets forwarded.
+        result, _, mock_launch = self._provider_launch(
+            monkeypatch,
+            ["claude", "--model", "opus", "--provider", "cat.schema.svc"],
+            {"opus": "claude-opus-4-8", "haiku": "claude-haiku-4-5"},
+            relayed=True,
+        )
+        assert result.exit_code == 0, result.output
+        assert mock_launch.call_args.args[2] == ["--model", "claude-opus-4-8"]
+
+    def test_relayed_allowlist_auto_picks_best_tier_without_model(self, monkeypatch):
+        # Curated relay, no --model: forward the best allowed tier, not the (maybe forbidden) default.
+        result, _, mock_launch = self._provider_launch(
+            monkeypatch,
+            ["claude", "--provider", "cat.schema.svc"],
+            {"opus": "claude-opus-4-8", "sonnet": "claude-sonnet-5"},
+            relayed=True,
+        )
+        assert result.exit_code == 0, result.output
+        assert mock_launch.call_args.args[2] == ["--model", "claude-opus-4-8"]
+
+    def test_relayed_allowlist_rejects_unavailable_family(self, monkeypatch):
+        result, _, _ = self._provider_launch(
+            monkeypatch,
+            ["claude", "--model", "opus", "--provider", "cat.schema.svc"],
+            {"sonnet": "claude-sonnet-5", "haiku": "claude-haiku-4-5"},
+            relayed=True,
+        )
+        assert result.exit_code == 1
+        assert "does not offer a 'opus' model" in result.output
 
     def test_provider_sets_transient_claude_launch_marker(self):
         state = dict(MINIMAL_STATE)

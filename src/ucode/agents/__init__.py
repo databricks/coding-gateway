@@ -335,10 +335,10 @@ def resolve_provider_models(
     """Validate ``provider`` for ``tool`` and return the model ids to pin.
 
     Returns ``(provider_models, error, relayed)``. ``provider_models`` is a ``{family: model_id}``
-    dict re-derived from the service's live targets for a non-relayed claude service — both Bedrock
-    (provider-side slugs) and API-key Anthropic (canonical ids) — so the client sends exactly the ids
-    the MPS allows rather than Claude Code's defaults, which may not match the declared targets. It is
-    None when ``provider`` is None, for a relayed subscription (see below), or for a non-Claude (e.g.
+    dict re-derived from the service's declared targets — Bedrock (provider-side slugs), API-key
+    Anthropic, and relayed Anthropic that declares a curated allowlist alike — so the client uses the
+    ids the MPS allows rather than Claude Code's defaults. It is None when ``provider`` is None, when
+    the service declares no Claude targets (e.g. an ``allow_all`` relay), or for a non-Claude (e.g.
     codex) service. ``relayed`` is True for a credential-less Anthropic subscription relay, which the
     launch path wires with the relayed overlay + refresh proxy. A non-None ``error`` means the
     provider is invalid for the tool and the caller should not launch.
@@ -355,10 +355,8 @@ def resolve_provider_models(
     if error or service is None:
         return None, error, False
     relayed = bool(service.get("relayed"))
-    # Relayed (Claude Max/Enterprise subscription) is exempt: the gateway disables
-    # model selection server-side for that tier, so there's nothing to reconcile.
-    if relayed:
-        return None, None, relayed
+    # Relayed services enforce their declared targets too, so map them like any Anthropic service
+    # (allow_all declares none). relayed gates auth, not model reconciliation.
     # Only Claude pins per-family model ids. Codex ignores this map, and gemini resolves
     # its target through resolve_gemini_provider_model instead — so mapping their targets
     # through Claude-family logic would be meaningless (see docstring).

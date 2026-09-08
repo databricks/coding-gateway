@@ -1751,6 +1751,32 @@ class TestStatusSkillsSection:
                 assert "databricks-skill-registry" not in line
         assert "Skill MCP Locations: main.default" in out
 
+    def test_renders_per_agent_locations_when_scopes_diverge(self):
+        state = {
+            **MINIMAL_STATE,
+            "mcp_servers": [
+                {
+                    "name": "databricks-skill-registry",
+                    "kind": "skills",
+                    "skill_locations": ["main.default", "claude.only"],
+                    "skill_locations_by_client": {
+                        "claude": ["main.default", "claude.only"],
+                        "codex": ["main.default"],
+                    },
+                    "url": "https://example.databricks.com/ai-gateway/skills/?schema=main.default&schema=claude.only",
+                    "auth": "proxy",
+                    "clients": ["claude", "codex"],
+                }
+            ],
+        }
+
+        result = self._run(state)
+
+        assert result.exit_code == 0, result.output
+        out = _strip_ansi(result.output)
+        assert "Claude Code skill MCP locations: main.default, claude.only" in out
+        assert "Codex skill MCP locations: main.default" in out
+
 
 class TestRevert:
     def test_reverts_mcp_configs_before_clearing_state(self):

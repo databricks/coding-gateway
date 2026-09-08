@@ -114,6 +114,7 @@ from ucode.mcp import (
     purge_cross_workspace_mcp_residue,
     remove_mcp_command,
     revert_mcp_configs,
+    skill_locations_for_client,
 )
 from ucode.skills_download import (
     configure_skills_download_command,
@@ -997,17 +998,32 @@ def status() -> int:
     if not skill_mcp_entry:
         print_kv("Skills", "not configured")
     else:
-        locations = skill_mcp_entry.get("skill_locations") or []
-        print_kv(
-            "Skill MCP Locations",
-            ", ".join(locations) if locations else "none — utility tools only",
-        )
-        configured_agents = [
-            str(MCP_CLIENTS[client]["display"])
-            for client in (skill_mcp_entry.get("clients") or [])
-            if client in MCP_CLIENTS
+        configured_clients = [
+            client for client in (skill_mcp_entry.get("clients") or []) if client in MCP_CLIENTS
         ]
-        print_kv("Configured", ", ".join(configured_agents) if configured_agents else "none")
+        scopes = {
+            client: skill_locations_for_client(skill_mcp_entry, client)
+            for client in configured_clients
+        }
+        # Collapse to one line when every agent shares a scope; split per agent when they diverge.
+        if len({tuple(locations) for locations in scopes.values()}) <= 1:
+            locations = next(
+                iter(scopes.values()), list(skill_mcp_entry.get("skill_locations") or [])
+            )
+            print_kv(
+                "Skill MCP Locations",
+                ", ".join(locations) if locations else "none — utility tools only",
+            )
+            configured_agents = [
+                str(MCP_CLIENTS[client]["display"]) for client in configured_clients
+            ]
+            print_kv("Configured", ", ".join(configured_agents) if configured_agents else "none")
+        else:
+            for client, locations in scopes.items():
+                print_kv(
+                    f"{MCP_CLIENTS[client]['display']} skill MCP locations",
+                    ", ".join(locations) if locations else "none — utility tools only",
+                )
 
     print_heading("Tracing")
     tracing = state.get("tracing") or {}

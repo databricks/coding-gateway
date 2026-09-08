@@ -3528,6 +3528,23 @@ class TestBearerCommand:
         assert get_databricks_token(WS) == "tok"
         assert seen.read_text() == "--coords:a path"
 
+    def test_windows_hands_the_command_line_over_verbatim(self, tmp_path, monkeypatch):
+        # CreateProcess splits the string itself. shlex's POSIX rules would turn
+        # `C:\bin\broker.exe` into `C:binbroker.exe`, and posix=False would keep
+        # the quotes around a path containing spaces.
+        self._env(tmp_path, monkeypatch, r"C:\bin\broker.exe --arg")
+        monkeypatch.setattr(db_mod.os, "name", "nt")
+        seen = {}
+
+        def fake_run(args, **kwargs):
+            seen["args"] = args
+            return subprocess.CompletedProcess(args, 0, stdout="win-token\n", stderr="")
+
+        monkeypatch.setattr(db_mod, "run", fake_run)
+
+        assert get_databricks_token(WS) == "win-token"
+        assert seen["args"] == r"C:\bin\broker.exe --arg"
+
     def test_fails_closed_when_the_command_prints_no_token(self, tmp_path, monkeypatch):
         # Falling through to OAuth would report a misleading stale-login error:
         # a broker-backed profile carries no OAuth cache to refresh.

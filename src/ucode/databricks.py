@@ -692,7 +692,7 @@ def resolve_sql_warehouse_id(workspace: str, token: str) -> tuple[str | None, st
 
 @overload
 def run(
-    args: list[str],
+    args: list[str] | str,
     *,
     check: bool = True,
     capture_output: bool = False,
@@ -704,7 +704,7 @@ def run(
 
 @overload
 def run(
-    args: list[str],
+    args: list[str] | str,
     *,
     check: bool = True,
     capture_output: bool = False,
@@ -715,7 +715,7 @@ def run(
 
 
 def run(
-    args: list[str],
+    args: list[str] | str,
     *,
     check: bool = True,
     capture_output: bool = False,
@@ -1141,8 +1141,13 @@ def _bearer_from_command(command: str) -> str:
     Mirrors how ``auth-token --use-pat`` fails closed for the same reason."""
     _debug("get_databricks_token", "using DATABRICKS_BEARER_COMMAND")
     try:
+        # Windows takes the command line as one string and lets CreateProcess
+        # split it: shlex's POSIX rules would eat the backslashes in `C:\...`,
+        # and posix=False would keep the quotes around a path with spaces. This
+        # is the inverse of what build_auth_shell_command emits there.
+        argv = command if os.name == "nt" else shlex.split(command)
         result = run(
-            shlex.split(command),
+            argv,
             check=False,
             capture_output=True,
             text=True,

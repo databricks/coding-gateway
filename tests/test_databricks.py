@@ -3484,7 +3484,8 @@ class TestBearerCommand:
             'echo \'{"access_token": "oauth-token", "token_type": "Bearer"}\'\n'
         )
         fake.chmod(0o755)
-        env = {**os.environ, "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}"}
+        path = os.environ.get("PATH", "")
+        env = {**os.environ, "PATH": f"{tmp_path}{os.pathsep}{path}"}
         env.pop("DATABRICKS_BEARER", None)
         env.pop("DATABRICKS_BEARER_COMMAND", None)
         if command is not None:
@@ -3546,13 +3547,15 @@ class TestBearerCommand:
         assert seen["args"] == r"C:\bin\broker.exe --arg"
 
     def test_fails_closed_when_the_command_prints_no_token(self, tmp_path, monkeypatch):
-        # Falling through to OAuth would report a misleading stale-login error:
-        # a broker-backed profile carries no OAuth cache to refresh.
-        broker = self._broker(tmp_path, 'echo "broker unreachable" >&2\nexit 7')
+        # Exit 0 with an empty stdout. Falling through to OAuth would report a
+        # misleading stale-login error: a broker-backed profile carries no OAuth
+        # cache to refresh. Stderr rides along so the error names a cause.
+        broker = self._broker(tmp_path, 'echo "nothing to vend" >&2')
         marker = self._env(tmp_path, monkeypatch, broker)
 
-        with pytest.raises(RuntimeError, match="exited 7"):
+        with pytest.raises(RuntimeError, match="printed no token") as excinfo:
             get_databricks_token(WS)
+        assert "nothing to vend" in str(excinfo.value)
         assert not marker.exists()
 
     def test_fails_closed_when_the_command_exits_non_zero(self, tmp_path, monkeypatch):

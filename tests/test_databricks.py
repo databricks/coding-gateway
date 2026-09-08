@@ -3464,3 +3464,96 @@ class TestAllUsersCanUseSchema:
         all_users_can_use_schema("https://ws", "tok", "main.tien_le")
         assert "effective-permissions/schema/main.tien_le" in seen["url"]
         assert "principal=account%20users" in seen["url"]
+
+
+class TestBearerCommand:
+    """``DATABRICKS_BEARER_COMMAND`` is the command form of the static
+    ``DATABRICKS_BEARER`` hatch, for callers whose bearer expires and has to be
+    re-minted mid-session (an external credential broker, a sidecar)."""
+
+    def _env(self, tmp_path, monkeypatch, command: str | None):
+        """Patch in an env with a recording fake `databricks` on PATH.
+
+        The fake would happily serve a token, so any test asserting the marker
+        is absent is asserting the OAuth path was never reached.
+        """
+        marker = tmp_path / "cli-calls"
+        fake = tmp_path / "databricks"
+        fake.write_text(
+            f"#!/bin/sh\necho called >> {marker}\n"
+            'echo \'{"access_token": "oauth-token", "token_type": "Bearer"}\'\n'
+        )
+        fake.chmod(0o755)
+        env = {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"}
+        env.pop("DATABRICKS_BEARER", None)
+        env.pop("DATABRICKS_BEARER_COMMAND", None)
+        if command is not None:
+            env["DATABRICKS_BEARER_COMMAND"] = command
+        monkeypatch.setattr("os.environ", env)
+        return marker
+
+    def _broker(self, tmp_path, body: str) -> str:
+        script = tmp_path / "broker.sh"
+        script.write_text(f"#!/bin/sh\n{body}\n")
+        script.chmod(0o755)
+        return str(script)
+
+    def test_serves_the_command_output_without_touching_the_cli(self, tmp_path, monkeypatch):
+        broker = self._broker(tmp_path, 'echo "brokered-token"')
+        marker = self._env(tmp_path, monkeypatch, broker)
+
+        assert get_databricks_token(WS) == "brokered-token"
+        assert not marker.exists()
+
+    def test_reruns_the_command_on_every_fetch(self, tmp_path, monkeypatch):
+        # The whole point: a static env var cannot be rewritten in a running
+        # process, so an expiring bearer has to be re-minted per fetch.
+        counter = tmp_path / "mints"
+        counter.write_text("0")
+        broker = self._broker(
+            tmp_path,
+            f'n=$(cat {counter})\nn=$((n + 1))\necho $n > {counter}\necho "token-$n"',
+        )
+        self._env(tmp_path, monkeypatch, broker)
+
+        assert get_databricks_token(WS) == "token-1"
+        assert get_databricks_token(WS) == "token-2"
+
+    def test_passes_arguments_without_a_shell(self, tmp_path, monkeypatch):
+        # Argv is shlex-split, not handed to `sh -c`, so this stays cross-platform.
+        seen = tmp_path / "args"
+        broker = self._broker(tmp_path, f'printf "%s" "$1:$2" > {seen}\necho tok')
+        self._env(tmp_path, monkeypatch, f"{broker} --coords 'a path'")
+
+        assert get_databricks_token(WS) == "tok"
+        assert seen.read_text() == "--coords:a path"
+
+    def test_fails_closed_when_the_command_prints_no_token(self, tmp_path, monkeypatch):
+        # Falling through to OAuth would report a misleading stale-login error:
+        # a broker-backed profile carries no OAuth cache to refresh.
+        broker = self._broker(tmp_path, 'echo "broker unreachable" >&2\nexit 7')
+        marker = self._env(tmp_path, monkeypatch, broker)
+
+        with pytest.raises(RuntimeError, match="exited 7"):
+            get_databricks_token(WS)
+        assert not marker.exists()
+
+    def test_reports_an_unrunnable_command(self, tmp_path, monkeypatch):
+        self._env(tmp_path, monkeypatch, str(tmp_path / "does-not-exist"))
+
+        with pytest.raises(RuntimeError, match="could not be run"):
+            get_databricks_token(WS)
+
+    def test_static_bearer_still_wins(self, tmp_path, monkeypatch):
+        broker = self._broker(tmp_path, 'echo "brokered-token"')
+        self._env(tmp_path, monkeypatch, broker)
+        os.environ["DATABRICKS_BEARER"] = "ci-bearer"
+
+        assert get_databricks_token(WS) == "ci-bearer"
+
+    def test_has_valid_auth_short_circuits(self, tmp_path, monkeypatch):
+        # Otherwise `ensure_databricks_auth` probes the CLI and can open a browser.
+        marker = self._env(tmp_path, monkeypatch, self._broker(tmp_path, "echo tok"))
+
+        assert db_mod.has_valid_databricks_auth(WS) is True
+        assert not marker.exists()

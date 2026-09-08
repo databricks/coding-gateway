@@ -897,15 +897,23 @@ def _profile_args(profile: str | None) -> list[str]:
     return ["--profile", profile] if profile else []
 
 
+def external_bearer_configured() -> bool:
+    """Whether something outside ucode owns auth for this process.
+
+    True when either hatch is set: ``DATABRICKS_BEARER`` (a pre-fetched bearer)
+    or ``DATABRICKS_BEARER_COMMAND`` (one minted on demand). Both make an
+    interactive login pointless, since ``get_databricks_token`` returns before
+    it ever reaches the OAuth path."""
+    return bool(
+        os.environ.get("DATABRICKS_BEARER", "").strip()
+        or os.environ.get("DATABRICKS_BEARER_COMMAND", "").strip()
+    )
+
+
 def has_valid_databricks_auth(workspace: str, profile: str | None = None) -> bool:
-    # Honor the CI short-circuit (see ``get_databricks_token``): if a
-    # pre-fetched bearer is available, treat auth as valid and skip the
-    # `databricks auth token` shell-out (which only knows user-OAuth).
-    if os.environ.get("DATABRICKS_BEARER", "").strip():
-        return True
-    # A bearer command is the same declaration of ownership: the caller mints
-    # its own tokens, so don't probe the CLI or trigger an interactive login.
-    if os.environ.get("DATABRICKS_BEARER_COMMAND", "").strip():
+    # Auth owned elsewhere is valid by definition: skip the `databricks auth
+    # token` shell-out (which only knows user-OAuth) and any login it triggers.
+    if external_bearer_configured():
         return True
     _log_auth_diagnostics()
     # Mirror run_databricks_login: when ~/.databrickscfg has multiple

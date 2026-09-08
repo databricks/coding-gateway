@@ -1163,13 +1163,13 @@ def _bearer_from_command(command: str) -> str:
     stderr = (result.stderr or "").strip()[:500]
     _debug("bearer command", f"rc={result.returncode} stderr={stderr!r}")
     token = (result.stdout or "").strip()
-    if token:
+    if result.returncode == 0 and token:
         return token
+    # A non-zero exit fails closed even when something reached stdout: that is a
+    # diagnostic, not a bearer, and forwarding it only resurfaces as a 401.
+    reason = f"exited {result.returncode}" if result.returncode else "printed no token"
     detail = f" Stderr: {stderr}" if stderr else ""
-    raise RuntimeError(
-        f"DATABRICKS_BEARER_COMMAND exited {result.returncode} without printing a token. "
-        f"Command: {command}.{detail}"
-    )
+    raise RuntimeError(f"DATABRICKS_BEARER_COMMAND {reason}. Command: {command}.{detail}")
 
 
 def get_databricks_token(

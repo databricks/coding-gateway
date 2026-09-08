@@ -3484,7 +3484,7 @@ class TestBearerCommand:
             'echo \'{"access_token": "oauth-token", "token_type": "Bearer"}\'\n'
         )
         fake.chmod(0o755)
-        env = {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"}
+        env = {**os.environ, "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}"}
         env.pop("DATABRICKS_BEARER", None)
         env.pop("DATABRICKS_BEARER_COMMAND", None)
         if command is not None:
@@ -3549,6 +3549,16 @@ class TestBearerCommand:
         # Falling through to OAuth would report a misleading stale-login error:
         # a broker-backed profile carries no OAuth cache to refresh.
         broker = self._broker(tmp_path, 'echo "broker unreachable" >&2\nexit 7')
+        marker = self._env(tmp_path, monkeypatch, broker)
+
+        with pytest.raises(RuntimeError, match="exited 7"):
+            get_databricks_token(WS)
+        assert not marker.exists()
+
+    def test_fails_closed_when_the_command_exits_non_zero(self, tmp_path, monkeypatch):
+        # Stdout on a failing command is a diagnostic, not a bearer. Forwarding it
+        # would only resurface as a 401 far from the real cause.
+        broker = self._broker(tmp_path, 'echo "broker unreachable"\nexit 7')
         marker = self._env(tmp_path, monkeypatch, broker)
 
         with pytest.raises(RuntimeError, match="exited 7"):

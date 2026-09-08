@@ -2398,7 +2398,7 @@ def remove_skills_command() -> int:
             for location in locations_by_client.get(client, [])
             if location not in remove_locations
         ]
-    _update_skills_mcp(state, workspace, profile, clients, locations_by_client)
+    _update_skills_mcp(state, workspace, profile, clients, locations_by_client, print_summary=False)
     print_success(
         f"Removed {len(remove_locations)} skill schema{'s' if len(remove_locations) != 1 else ''}."
     )

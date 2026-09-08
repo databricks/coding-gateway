@@ -1307,16 +1307,11 @@ def skills_add(
         requested_skills = (
             None if skills is None else {s.strip() for s in skills.split(",") if s.strip()}
         )
-        requested_agents = None
-        if agents is not None:
-            requested_agents = {
-                agent.strip().lower() for agent in agents.split(",") if agent.strip()
-            }
-            if not requested_agents:
-                raise RuntimeError(
-                    "No agents provided for --agents. Use a comma-separated list like "
-                    "`--agents claude,codex`."
-                )
+        requested_agents = (
+            None
+            if agents is None
+            else ({agent.strip().lower() for agent in agents.split(",") if agent.strip()} or None)
+        )
         if mcp and path is not None:
             raise RuntimeError("--path is not supported when using --mcp")
         if mcp and requested_skills is not None:

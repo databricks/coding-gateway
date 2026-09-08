@@ -1568,7 +1568,7 @@ class TestSkillsAddCommand:
         configure.assert_not_called()
         mock_add.assert_called_once_with(["a.b"], agents={"claude"})
 
-    def test_empty_agents_scope_is_rejected(self):
+    def test_empty_agents_folds_to_global_scope(self):
         with (
             patch("ucode.cli._configure_agents_for_mcp") as configure,
             patch("ucode.cli.add_skills_command") as mock_add,
@@ -1578,10 +1578,9 @@ class TestSkillsAddCommand:
                 ["skill", "add", "--location", "a.b", "--mcp", "--agents", ","],
             )
 
-        assert result.exit_code == 1
-        assert "No agents provided for --agents" in _strip_ansi(result.output)
+        assert result.exit_code == 0, result.output
         configure.assert_not_called()
-        mock_add.assert_not_called()
+        mock_add.assert_called_once_with(["a.b"])
 
     def test_agents_is_rejected_for_download_mode(self):
         with patch("ucode.cli.configure_skills_download_command") as mock_download:

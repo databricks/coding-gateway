@@ -1533,6 +1533,64 @@ class TestSkillsAddCommand:
         assert "--location" in _strip_ansi(result.output)
         mock_add.assert_not_called()
 
+    def test_agents_scope_bootstraps_only_unconfigured_and_forwards_full_scope(self):
+        with (
+            patch("ucode.cli.load_state", return_value={"workspace": "https://ws"}),
+            patch("ucode.cli.available_mcp_clients", return_value=["claude", "codex"]),
+            patch("ucode.cli.configured_mcp_clients", return_value=["claude"]),
+            patch("ucode.cli._configure_agents_for_mcp", return_value={"codex"}) as configure,
+            patch("ucode.cli.add_skills_command") as mock_add,
+        ):
+            result = runner.invoke(
+                app,
+                ["skill", "add", "--location", "a.b", "--mcp", "--agents", "claude,codex"],
+            )
+
+        assert result.exit_code == 0, result.output
+        # Only the not-yet-configured agent is bootstrapped; the scope keeps both.
+        configure.assert_called_once_with(["codex"])
+        mock_add.assert_called_once_with(["a.b"], agents={"claude", "codex"})
+
+    def test_already_configured_agent_skips_bootstrap(self):
+        with (
+            patch("ucode.cli.load_state", return_value={"workspace": "https://ws"}),
+            patch("ucode.cli.available_mcp_clients", return_value=["claude", "codex"]),
+            patch("ucode.cli.configured_mcp_clients", return_value=["claude"]),
+            patch("ucode.cli._configure_agents_for_mcp") as configure,
+            patch("ucode.cli.add_skills_command") as mock_add,
+        ):
+            result = runner.invoke(
+                app,
+                ["skill", "add", "--location", "a.b", "--mcp", "--agents", "claude"],
+            )
+
+        assert result.exit_code == 0, result.output
+        configure.assert_not_called()
+        mock_add.assert_called_once_with(["a.b"], agents={"claude"})
+
+    def test_empty_agents_scope_is_rejected(self):
+        with (
+            patch("ucode.cli._configure_agents_for_mcp") as configure,
+            patch("ucode.cli.add_skills_command") as mock_add,
+        ):
+            result = runner.invoke(
+                app,
+                ["skill", "add", "--location", "a.b", "--mcp", "--agents", ","],
+            )
+
+        assert result.exit_code == 1
+        assert "No agents provided for --agents" in _strip_ansi(result.output)
+        configure.assert_not_called()
+        mock_add.assert_not_called()
+
+    def test_agents_is_rejected_for_download_mode(self):
+        with patch("ucode.cli.configure_skills_download_command") as mock_download:
+            result = runner.invoke(app, ["skill", "add", "--location", "a.b", "--agents", "claude"])
+
+        assert result.exit_code == 1
+        assert "--agents is only supported when using --mcp" in _strip_ansi(result.output)
+        mock_download.assert_not_called()
+
 
 class TestManagedSkillsOnLaunch:
     """Managed skills are delivered by download only: the launch path downloads them and never

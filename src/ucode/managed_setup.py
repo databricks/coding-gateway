@@ -182,36 +182,50 @@ def claude_model_slots(models: list[str]) -> dict[str, str]:
 
 
 def _model_config_payload(tool: str, model_config: dict) -> dict:
-    """Build one ``AgentModelConfig`` oneof variant body for ``tool``.
+    """Build one agent's ``models`` object and ``default_models`` map for the wire.
 
-    Shapes per the proto: claude gets `models` as a `ClaudeDefaultModels` slot object, codex gets
-    no model list at all, and the rest get a flat repeated `models`.
+    The v2 wire shape has two top-level per-agent fields: ``models`` (the source,
+    as model_provider_service / unity_catalog_location / model_services) and
+    ``default_models`` (a flat map with the overall default_model plus family slots).
+    For claude, the internal has a `models` dict of family slots; for flat-list agents,
+    it has a `names` list.
     """
-    body: dict = {}
+    models_obj: dict = {}
     mps = model_config.get("model_provider_service")
     if isinstance(mps, str) and mps:
-        body["model_provider_service"] = mps
+        models_obj["model_provider_service"] = mps
+    location = model_config.get("model_service_location")
+    if isinstance(location, str) and location:
+        models_obj["unity_catalog_location"] = location
+
+    names = model_config.get("names")
+    if isinstance(names, list):
+        model_list = [m for m in names if isinstance(m, str) and m]
+        if model_list:
+            models_obj["model_services"] = model_list
+
+    default_models_map: dict = {}
     default_model = model_config.get("default_model")
     if isinstance(default_model, str) and default_model:
-        body["default_model"] = default_model
+        default_models_map["default_model"] = default_model
 
     models = model_config.get("models")
-    if tool == "claude":
-        if isinstance(models, dict):
-            slots = {
-                slot: value
-                for slot, value in models.items()
-                if isinstance(slot, str) and isinstance(value, str) and value
-            }
-            if slots:
-                body["models"] = slots
-    elif tool in _FLAT_MODEL_LIST_AGENTS:
-        if isinstance(models, list):
-            model_list = [m for m in models if isinstance(m, str) and m]
-            if model_list:
-                body["models"] = model_list
-    # codex intentionally carries no model list — CodexModelConfig has only
-    # model_provider_service + default_model.
+    if isinstance(models, dict):
+        for slot in (
+            "default_opus_model",
+            "default_sonnet_model",
+            "default_haiku_model",
+            "default_fable_model",
+        ):
+            model = models.get(slot)
+            if isinstance(model, str) and model:
+                default_models_map[slot] = model
+
+    body: dict = {}
+    if models_obj:
+        body["models"] = models_obj
+    if default_models_map:
+        body["default_models"] = default_models_map
     return body
 
 
@@ -222,19 +236,15 @@ def _enabled_agent_payload(tool: str, agent_config: dict) -> dict:
     if isinstance(headers, dict):
         clean = {k: v for k, v in headers.items() if isinstance(k, str) and isinstance(v, str)}
         if clean:
-            config["custom_headers"] = clean
+            config["http_headers"] = clean
     tracing_table = agent_config.get("tracing_table")
     if isinstance(tracing_table, str) and tracing_table:
-        config["tracing_config"] = {"table": tracing_table}
+        config["tracing"] = {"enabled": True}
     model_config = agent_config.get("model_config")
     if isinstance(model_config, dict):
-        body = _model_config_payload(tool, model_config)
-        if body:
-            # The `AgentModelConfig` oneof field names are ucode's tool names verbatim (claude,
-            # codex, opencode, pi, gemini, copilot), so the tool doubles as the variant key. The
-            # server rejects a variant that doesn't match its agent (`validateAgentModelConfig`),
-            # and the round-trip through `normalize_managed_config` pins that alignment in tests.
-            config["model_config"] = {tool: body}
+        payload = _model_config_payload(tool, model_config)
+        if payload:
+            config.update(payload)
 
     entry: dict = {"agent": AGENT_TOOL_TO_ENUM[tool]}
     if config:
@@ -243,7 +253,7 @@ def _enabled_agent_payload(tool: str, agent_config: dict) -> dict:
 
 
 def _budget_policy_payload(budget_policy: dict) -> dict:
-    """Build the ``BudgetPolicy`` body, dropping tiers that name an unknown agent.
+    """Build the ``spend_tiers`` body, dropping tiers that name an unknown agent.
 
     ``spending_percentage`` is passed through as-is: it is a fraction in [0, 1] both in ucode's
     manifest and in the proto (the server validates that range). Callers prompting an admin in
@@ -268,10 +278,10 @@ def _budget_policy_payload(budget_policy: dict) -> dict:
         tier_payload: dict = {"spending_percentage": float(pct)}
         agent_enum = AGENT_TOOL_TO_ENUM.get(str(tier.get("default_agent") or ""))
         if agent_enum:
-            tier_payload["default_agent"] = agent_enum
+            tier_payload["recommended_agent"] = agent_enum
         default_model = tier.get("default_model")
         if isinstance(default_model, str) and default_model:
-            tier_payload["default_model"] = default_model
+            tier_payload["recommended_model"] = default_model
         tiers.append(tier_payload)
     if tiers:
         payload["tiers"] = tiers
@@ -282,13 +292,13 @@ def serialize_managed_config(manifest: dict) -> dict:
     """Serialize ucode's internal manifest into a proto-JSON ``CodingAgentConfig``.
 
     The exact inverse of :func:`ucode.managed_config.normalize_managed_config`: tool names become
-    ``CODING_AGENT_*`` enums, MCP type tags become ``MCP_SERVER_TYPE_*``, and each agent's model
-    config is wrapped in its matching ``AgentModelConfig`` oneof variant. Agents and MCP types this
-    build doesn't recognize are dropped, mirroring the read side.
+    ``CODING_AGENT_*`` enums, internal ``models`` slots become ``default_models`` map keys, and
+    MCP type tags become ``MCP_SERVER_TYPE_*`` enums. Agents and MCP types this build doesn't
+    recognize are dropped, mirroring the read side.
 
-    Output-only proto fields (``workspace_id``, timestamps, user ids) are never emitted. ``name`` is
-    carried through when present so an update path can address an existing resource; ``ucode publish``
-    omits it on create and lets the server assign one.
+    Output-only proto fields (``workspace_id``, ``retrieved_time``, user ids) are never emitted.
+    ``name`` is carried through when present so an update path can address an existing resource;
+    ``ucode publish`` omits it on create and lets the server assign one.
     """
     payload: dict = {}
 
@@ -315,16 +325,19 @@ def serialize_managed_config(manifest: dict) -> dict:
 
     mcp_servers = manifest.get("mcp_servers")
     if isinstance(mcp_servers, list):
-        servers: list[dict] = []
+        names: list[str] = []
+        tags: list[str] = []
         for server in mcp_servers:
             if not isinstance(server, dict):
                 continue
             server_name = server.get("name")
-            type_enum = MCP_TAG_TO_TYPE_ENUM.get(str(server.get("type") or ""))
+            type_tag = str(server.get("type") or "")
+            type_enum = MCP_TAG_TO_TYPE_ENUM.get(type_tag)
             if isinstance(server_name, str) and server_name and type_enum:
-                servers.append({"name": server_name, "type": type_enum})
-        if servers:
-            payload["mcp_servers"] = servers
+                names.append(server_name)
+                tags.append(type_enum)
+        if names:
+            payload["mcp_servers"] = {"names": names, "tags": tags}
 
     skills = manifest.get("skills")
     if isinstance(skills, dict):
@@ -332,17 +345,17 @@ def serialize_managed_config(manifest: dict) -> dict:
         if isinstance(names, list):
             skill_names = [n for n in names if isinstance(n, str) and n]
             if skill_names:
-                payload["skills"] = {"names": skill_names}
+                payload["skills"] = {"names": skill_names, "tags": []}
 
     tracing_table = manifest.get("tracing_table")
     if isinstance(tracing_table, str) and tracing_table:
-        payload["tracing"] = {"table": tracing_table}
+        payload["tracing"] = {"enabled": True}
 
     budget_policy = manifest.get("budget_policy")
     if isinstance(budget_policy, dict):
         policy = _budget_policy_payload(budget_policy)
         if policy:
-            payload["budget_policy"] = policy
+            payload["spend_tiers"] = policy
 
     return payload
 
@@ -502,9 +515,9 @@ def validate_manifest(manifest: dict, state: dict | None = None) -> list[str]:
 def _agent_model_ids(agent_config: dict) -> set[str]:
     """Every model id an agent is configured with — its list plus its default.
 
-    Claude's ``models`` is a family-slot dict and the others' a flat list; codex has no list at all,
-    only ``default_model``. Returns an empty set when nothing is configured, which callers treat as
-    "can't check" rather than "nothing is allowed".
+    Claude's ``models`` is a family-slot dict; flat-list agents use ``names`` (a list);
+    codex has no list at all, only ``default_model``. Returns an empty set when nothing
+    is configured, which callers treat as "can't check" rather than "nothing is allowed".
     """
     model_config = agent_config.get("model_config")
     if not isinstance(model_config, dict):
@@ -515,6 +528,9 @@ def _agent_model_ids(agent_config: dict) -> set[str]:
         ids.update(v for v in raw.values() if isinstance(v, str) and v)
     elif isinstance(raw, list):
         ids.update(m for m in raw if isinstance(m, str) and m)
+    names = model_config.get("names")
+    if isinstance(names, list):
+        ids.update(m for m in names if isinstance(m, str) and m)
     default_model = model_config.get("default_model")
     if isinstance(default_model, str) and default_model:
         ids.add(default_model)

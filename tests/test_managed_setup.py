@@ -59,13 +59,16 @@ def _minimal_manifest() -> dict:
 
 
 def _full_manifest() -> dict:
-    """A manifest exercising every field the read side normalizes."""
+    """A manifest exercising every field the read side normalizes.
+
+    Note: top-level tracing_table is not included because the new wire format (tracing.enabled)
+    cannot express table information, so the round-trip would lose it.
+    """
     return {
         "default_agent": "claude",
         "enabled_agents": {
             "claude": {
                 "custom_headers": {"x-databricks-workspace": "eng-ml-inference"},
-                "tracing_table": "main.default.claude-traces",
                 "model_config": {
                     "default_model": "system.ai.claude-opus-4-8",
                     "models": {
@@ -80,7 +83,7 @@ def _full_manifest() -> dict:
             "opencode": {
                 "model_config": {
                     "default_model": "system.ai.claude-opus-4-8",
-                    "models": ["system.ai.claude-opus-4-8", "system.ai.kimi-k2-6"],
+                    "names": ["system.ai.claude-opus-4-8", "system.ai.kimi-k2-6"],
                 },
             },
         },
@@ -89,7 +92,6 @@ def _full_manifest() -> dict:
             {"name": "genie-space-id", "type": "genie-space"},
         ],
         "skills": {"names": ["system.ai.pdf-extraction"]},
-        "tracing_table": "main.default.ucode-traces",
         "budget_policy": {
             "display_name": "eng-tiered-routing",
             "budget_id": "c6563b45-df9a-4b19-afb2-d42dc2b52576",
@@ -139,13 +141,14 @@ class TestRoundTrip:
 
     def test_every_known_agent_round_trips(self):
         # Each agent's oneof variant must survive a round trip, including the flat-list agents and
-        # codex (which has no model list at all).
+        # codex (which has no model list at all). Claude uses 'models' (a dict of slots); flat-list
+        # agents use 'names' (a list); codex uses neither.
         for tool in AGENT_TOOL_TO_ENUM:
             model_config: dict = {"default_model": "system.ai.some-model"}
             if tool == "claude":
                 model_config["models"] = {"default_opus_model": "system.ai.claude-opus-4-8"}
             elif tool != "codex":
-                model_config["models"] = ["system.ai.some-model"]
+                model_config["names"] = ["system.ai.some-model"]
             manifest = {
                 "default_agent": tool,
                 "enabled_agents": {tool: {"model_config": model_config}},
@@ -171,15 +174,14 @@ class TestSerialize:
             for entry in payload["enabled_agents"]
             if entry["agent"] == "CODING_AGENT_CLAUDE_CODE"
         )
-        variant = claude["config"]["model_config"]
-        assert set(variant) == {"claude"}
-        assert variant["claude"]["models"] == {
+        assert claude["config"]["default_models"] == {
+            "default_model": "system.ai.claude-opus-4-8",
             "default_opus_model": "system.ai.claude-opus-4-8",
             "default_sonnet_model": "system.ai.claude-sonnet-4-6",
         }
 
     def test_codex_model_config_has_no_model_list(self):
-        # CodexModelConfig carries only model_provider_service + default_model.
+        # Codex carries only default_models, no model_services list.
         manifest = {
             "default_agent": "codex",
             "enabled_agents": {
@@ -193,9 +195,9 @@ class TestSerialize:
             },
         }
         payload = serialize_managed_config(manifest)
-        variant = payload["enabled_agents"][0]["config"]["model_config"]["codex"]
-        assert "models" not in variant
-        assert variant["default_model"] == "system.ai.gpt-5-6"
+        config = payload["enabled_agents"][0]["config"]
+        assert "models" not in config
+        assert config["default_models"]["default_model"] == "system.ai.gpt-5-6"
 
     def test_flat_list_agents_use_repeated_models(self):
         payload = serialize_managed_config(_full_manifest())
@@ -204,8 +206,10 @@ class TestSerialize:
             for entry in payload["enabled_agents"]
             if entry["agent"] == "CODING_AGENT_OPENCODE"
         )
-        variant = opencode["config"]["model_config"]["opencode"]
-        assert variant["models"] == ["system.ai.claude-opus-4-8", "system.ai.kimi-k2-6"]
+        assert opencode["config"]["models"]["model_services"] == [
+            "system.ai.claude-opus-4-8",
+            "system.ai.kimi-k2-6",
+        ]
 
     def test_model_provider_service_is_carried_through(self):
         manifest = {
@@ -220,43 +224,46 @@ class TestSerialize:
             },
         }
         payload = serialize_managed_config(manifest)
-        variant = payload["enabled_agents"][0]["config"]["model_config"]["claude"]
-        assert variant["model_provider_service"] == "main.default.anthropic-mps"
+        config = payload["enabled_agents"][0]["config"]
+        assert config["models"]["model_provider_service"] == "main.default.anthropic-mps"
 
     def test_mcp_types_map_to_proto_enums(self):
         payload = serialize_managed_config(_full_manifest())
-        assert payload["mcp_servers"] == [
-            {"name": "system.ai.github", "type": "MCP_SERVER_TYPE_UC_SERVICE"},
-            {"name": "genie-space-id", "type": "MCP_SERVER_TYPE_GENIE"},
-        ]
+        assert payload["mcp_servers"] == {
+            "names": ["system.ai.github", "genie-space-id"],
+            "tags": ["MCP_SERVER_TYPE_UC_SERVICE", "MCP_SERVER_TYPE_GENIE"],
+        }
 
-    def test_tracing_becomes_a_table_object(self):
-        payload = serialize_managed_config(_full_manifest())
-        assert payload["tracing"] == {"table": "main.default.ucode-traces"}
-
-    def test_per_agent_tracing_override(self):
-        payload = serialize_managed_config(_full_manifest())
+    def test_per_agent_tracing_enabled(self):
+        manifest = {
+            "default_agent": "claude",
+            "enabled_agents": {
+                "claude": {
+                    "tracing_table": "main.default.claude-traces",
+                    "model_config": {"default_model": "system.ai.claude-opus-4-8"},
+                }
+            },
+        }
+        payload = serialize_managed_config(manifest)
         claude = next(
             entry
             for entry in payload["enabled_agents"]
             if entry["agent"] == "CODING_AGENT_CLAUDE_CODE"
         )
-        assert claude["config"]["tracing_config"] == {"table": "main.default.claude-traces"}
+        assert claude["config"]["tracing"] == {"enabled": True}
 
     def test_budget_tiers_keep_fractions(self):
         # The server validates 0 <= spending_percentage <= 1, so these stay fractions.
         payload = serialize_managed_config(_full_manifest())
-        tiers = payload["budget_policy"]["tiers"]
+        tiers = payload["spend_tiers"]["tiers"]
         assert [tier["spending_percentage"] for tier in tiers] == [0.8, 1.0]
-        assert tiers[1]["default_agent"] == "CODING_AGENT_OPENCODE"
+        assert tiers[1]["recommended_agent"] == "CODING_AGENT_OPENCODE"
 
-    def test_the_deprecated_top_level_budget_id_is_never_emitted(self):
-        # `CodingAgentConfig.budget_id` (field 3) is deprecated in favour of
-        # `budget_policy.budget_id`, and the CRUD handler rejects a write that sets it. The budget
-        # id must appear only under the policy.
+    def test_budget_id_appears_only_under_spend_tiers(self):
+        # The budget id must appear under spend_tiers, not at the top level.
         payload = serialize_managed_config(_full_manifest())
         assert "budget_id" not in payload
-        assert payload["budget_policy"]["budget_id"] == "c6563b45-df9a-4b19-afb2-d42dc2b52576"
+        assert payload["spend_tiers"]["budget_id"] == "c6563b45-df9a-4b19-afb2-d42dc2b52576"
 
     def test_a_manifest_carrying_a_top_level_budget_id_still_omits_it(self):
         # A hand-written `--from-file` manifest could set it; the serializer must not pass it on.
@@ -281,7 +288,10 @@ class TestSerialize:
         payload = serialize_managed_config(
             {"mcp_servers": [{"name": "a", "type": "not-a-type"}, {"name": "b", "type": "sql"}]}
         )
-        assert payload["mcp_servers"] == [{"name": "b", "type": "MCP_SERVER_TYPE_DATABRICKS_SQL"}]
+        assert payload["mcp_servers"] == {
+            "names": ["b"],
+            "tags": ["MCP_SERVER_TYPE_DATABRICKS_SQL"],
+        }
 
     def test_empty_manifest_serializes_to_empty_payload(self):
         assert serialize_managed_config({}) == {}
@@ -396,7 +406,7 @@ class TestClaudeSlots:
     def test_unidentifiable_models_are_skipped(self):
         assert claude_model_slots(["system.ai.gpt-5-6"]) == {}
 
-    def test_slots_serialize_into_the_claude_variant(self):
+    def test_slots_serialize_into_the_default_models_map(self):
         manifest = {
             "default_agent": "claude",
             "enabled_agents": {
@@ -409,8 +419,11 @@ class TestClaudeSlots:
             },
         }
         payload = serialize_managed_config(manifest)
-        variant = payload["enabled_agents"][0]["config"]["model_config"]["claude"]
-        assert variant["models"] == {"default_opus_model": "system.ai.claude-opus-4-8"}
+        config = payload["enabled_agents"][0]["config"]
+        assert config["default_models"] == {
+            "default_model": "system.ai.claude-opus-4-8",
+            "default_opus_model": "system.ai.claude-opus-4-8",
+        }
 
 
 class TestClaudeFamilyCandidates:

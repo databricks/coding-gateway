@@ -1572,7 +1572,14 @@ class TestSkillsRemoveCommand:
             result = runner.invoke(app, ["skill", "remove", "--mcp"])
 
         assert result.exit_code == 0, result.output
-        remove.assert_called_once_with()
+        remove.assert_called_once_with(agents=None)
+
+    def test_mcp_remove_forwards_agent_scope(self):
+        with patch("ucode.cli.remove_skills_command") as remove:
+            result = runner.invoke(app, ["skill", "remove", "--mcp", "--agents", "claude, codex"])
+
+        assert result.exit_code == 0, result.output
+        remove.assert_called_once_with(agents={"claude", "codex"})
 
 
 class TestManagedSkillsOnLaunch:

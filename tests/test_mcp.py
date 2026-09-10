@@ -2745,6 +2745,44 @@ class TestRemoveSkillsCommand:
         assert mcp.remove_skills_command() == 0
         assert captured["scopes"] == {"claude": ["A.a", "B.b"], "codex": ["A.a"]}
 
+    def test_agent_scope_removes_from_only_named_client(self, monkeypatch):
+        # The headline fix: add-all then remove --agents claude drops the schema for claude only.
+        state = self._state()
+        configured = self._stub(monkeypatch, state, ["A.a"])
+
+        assert mcp.remove_skills_command(agents={"claude"}) == 0
+
+        entry = _find_skills(state["mcp_servers"])[0]
+        assert mcp.skill_locations_for_client(entry, "claude") == ["B.b"]
+        assert mcp.skill_locations_for_client(entry, "codex") == ["A.a", "B.b"]
+        assert configured == [("claude", f"{WS}/ai-gateway/skills/?schema=B.b")]
+
+    def test_agent_scope_offers_only_named_clients_scope(self, monkeypatch):
+        state = self._state({"claude": ["A.a", "B.b"], "codex": ["A.a"]})
+        captured: dict[str, dict[str, list[str]]] = {}
+        _stub_location_base(monkeypatch, state)
+        monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude", "codex"])
+        monkeypatch.setattr(
+            mcp,
+            "_prompt_for_skill_removal",
+            lambda scopes: captured.setdefault("scopes", scopes) and None,
+        )
+
+        assert mcp.remove_skills_command(agents={"claude"}) == 0
+        assert captured["scopes"] == {"claude": ["A.a", "B.b"]}
+
+    def test_agent_scope_with_empty_scope_is_a_noop(self, monkeypatch):
+        state = self._state({"claude": ["A.a"], "codex": []})
+        captured: dict[str, bool] = {}
+        _stub_location_base(monkeypatch, state)
+        monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude", "codex"])
+        monkeypatch.setattr(
+            mcp, "_prompt_for_skill_removal", lambda scopes: captured.setdefault("called", True)
+        )
+
+        assert mcp.remove_skills_command(agents={"codex"}) == 0
+        assert "called" not in captured
+
 
 class TestRegisterSchemalessSkillsConnection:
     def _stub(self, monkeypatch):

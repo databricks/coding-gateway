@@ -2336,23 +2336,26 @@ def _prompt_for_skill_removal(locations_by_client: dict[str, list[str]]) -> list
     return [str(value) for value in selection]
 
 
-def remove_skills_command() -> int:
-    """`ucode skill remove --mcp`: interactively drop skill schemas from every configured client.
+def remove_skills_command(agents: set[str] | None = None) -> int:
+    """`ucode skill remove --mcp`: interactively drop skill schemas from clients' skills scopes.
 
-    Shows the schemas currently in each configured client's skills scope and removes the ones you
-    select from every client that has them. It never adds or reconfigures anything, and needs no
-    Databricks auth."""
+    Shows the schemas in each targeted client's skills scope and removes the ones you select from
+    those clients. Without ``agents`` a selected schema is removed from every configured client;
+    with ``agents`` (from ``--agents``) removal is scoped to the named clients and kept on the rest.
+    It never adds or reconfigures anything, and needs no Databricks auth."""
     state = load_state()
     workspace, profile, clients = setup_mcp_clients(
         state,
         "Remove Skills MCP",
         require_auth=False,
         action_note="Removing from",
+        agents=agents,
     )
     locations_by_client = _skill_locations_by_client_from_state(state)
     offered = {client: locations_by_client.get(client, []) for client in clients}
     if not any(offered.values()):
-        print_note("No skill schemas are configured to remove.")
+        scope = "" if agents is None else f" for {', '.join(sorted(agents))}"
+        print_note(f"No skill schemas are configured to remove{scope}.")
         return 0
 
     selection = _prompt_for_skill_removal(offered)

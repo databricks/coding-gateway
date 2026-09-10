@@ -165,6 +165,10 @@ class TestFirstPromptHook:
 
 
 class TestV2Launch:
+    def test_strips_gateway_prefix_for_interposer(self):
+        model = "anthropic-aigw-73ea02b2-system.ai.glm-5-2"
+        assert v2._unwrapped_claude_model_id(model) == "system.ai.glm-5-2"
+
     def test_restores_model_captured_immediately_before_switch(self, tmp_path, monkeypatch):
         ucode_settings = tmp_path / "ucode-settings.json"
         user_settings = tmp_path / "settings.json"

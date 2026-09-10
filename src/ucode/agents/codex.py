@@ -20,6 +20,7 @@ from ucode.config_io import (
     read_toml_safe,
     write_toml_file,
 )
+from ucode.custom_oauth import CustomOAuthConfig, build_custom_auth_token_argv
 from ucode.databricks import (
     build_auth_token_argv,
     build_tool_base_url,
@@ -146,8 +147,12 @@ def _provider_block(
     databricks_profile: str | None,
     use_pat: bool = False,
     provider: str | None = None,
+    custom_oauth: CustomOAuthConfig | None = None,
 ) -> dict:
-    auth_argv = build_auth_token_argv(workspace, databricks_profile, use_pat=use_pat)
+    if custom_oauth:
+        auth_argv = build_custom_auth_token_argv(workspace, custom_oauth)
+    else:
+        auth_argv = build_auth_token_argv(workspace, databricks_profile, use_pat=use_pat)
     base_url = build_tool_base_url("codex", workspace)
     http_headers = {
         "User-Agent": f"ucode/{ucode_version()} codex/{agent_version('codex')}",
@@ -178,13 +183,14 @@ def render_overlay(
     databricks_profile: str | None = None,
     use_pat: bool = False,
     provider: str | None = None,
+    custom_oauth: CustomOAuthConfig | None = None,
 ) -> dict:
     overlay: dict = {"model_provider": CODEX_MODEL_PROVIDER_NAME}
     if model:
         overlay["model"] = model
     overlay["model_providers"] = {
         CODEX_MODEL_PROVIDER_NAME: _provider_block(
-            workspace, databricks_profile, use_pat, provider
+            workspace, databricks_profile, use_pat, provider, custom_oauth
         ),
     }
     return overlay
@@ -196,6 +202,7 @@ def render_legacy_overlay(
     databricks_profile: str | None = None,
     use_pat: bool = False,
     provider: str | None = None,
+    custom_oauth: CustomOAuthConfig | None = None,
 ) -> dict:
     """Overlay for Codex CLI < 0.134.0, which only reads `~/.codex/config.toml`.
 
@@ -210,7 +217,7 @@ def render_legacy_overlay(
         "profiles": {CODEX_PROFILE_NAME: profile_block},
         "model_providers": {
             CODEX_MODEL_PROVIDER_NAME: _provider_block(
-                workspace, databricks_profile, use_pat, provider
+                workspace, databricks_profile, use_pat, provider, custom_oauth
             ),
         },
     }
@@ -325,6 +332,7 @@ def write_tool_config(state: dict, model: str | None = None, provider: str | Non
             databricks_profile,
             use_pat=bool(state.get("use_pat")),
             provider=provider,
+            custom_oauth=state.get("custom_oauth"),
         )
         doc = read_toml_safe(LEGACY_CODEX_CONFIG_PATH)
         deep_merge_dict(doc, overlay)
@@ -350,6 +358,7 @@ def write_tool_config(state: dict, model: str | None = None, provider: str | Non
         databricks_profile,
         use_pat=bool(state.get("use_pat")),
         provider=provider,
+        custom_oauth=state.get("custom_oauth"),
     )
 
     def compose(base: dict) -> dict:

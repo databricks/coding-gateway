@@ -17,6 +17,12 @@ GitHub Copilot CLI, and Pi through Databricks.
 uv tool install git+https://github.com/databricks/unity-gateway
 ```
 
+To enable the optional custom-client OAuth flow, install the `custom-oauth` extra:
+
+```bash
+uv tool install "ucode[custom-oauth] @ git+https://github.com/databricks/unity-gateway"
+```
+
 Check your version with `ug --version`. Between releases this looks like
 `0.1.0+14.g93986a8` — the trailing `g<hash>` is the exact commit the build came
 from, so include it when reporting a bug.

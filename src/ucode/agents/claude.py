@@ -25,6 +25,7 @@ from ucode.config_io import (
     write_json_file,
 )
 from ucode.constants import LOOPBACK_HOST
+from ucode.custom_oauth import CustomOAuthConfig, build_custom_auth_shell_command
 from ucode.databricks import (
     build_auth_shell_command,
     build_tool_base_url,
@@ -312,6 +313,7 @@ def render_overlay(
     disable_web_search: bool = False,
     profile: str | None = None,
     use_pat: bool = False,
+    custom_oauth: CustomOAuthConfig | None = None,
     provider: str | None = None,
     provider_models: dict[str, str] | None = None,
     fable_enabled: bool = False,
@@ -423,7 +425,10 @@ def render_overlay(
     if relayed:
         keys = [["env", k] for k in env]
     else:
-        overlay["apiKeyHelper"] = build_auth_shell_command(workspace, profile, use_pat=use_pat)
+        if custom_oauth:
+            overlay["apiKeyHelper"] = build_custom_auth_shell_command(workspace, custom_oauth)
+        else:
+            overlay["apiKeyHelper"] = build_auth_shell_command(workspace, profile, use_pat=use_pat)
         keys = [["apiKeyHelper"]] + [["env", k] for k in env]
 
     # Disable Claude Code's built-in WebSearch: it declares Anthropic's hosted
@@ -580,6 +585,7 @@ def write_tool_config(
         disable_web_search=web_search_model is not None,
         profile=state.get("profile"),
         use_pat=bool(state.get("use_pat")),
+        custom_oauth=state.get("custom_oauth"),
         provider=provider,
         provider_models=provider_models,
         fable_enabled=bool(state.get("fable_enabled")),

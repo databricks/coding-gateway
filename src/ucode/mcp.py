@@ -28,7 +28,7 @@ from questionary.prompts.common import InquirerControl
 from questionary.question import Question
 from questionary.styles import merge_styles_default
 
-from ucode.agents import copilot, cursor, gemini, opencode
+from ucode.agents import copilot, cursor, gemini, goose, opencode
 from ucode.config_io import restore_file
 from ucode.databricks import (
     PermissionDeniedError,
@@ -85,6 +85,11 @@ MCP_CLIENTS = {
         "binary": "gemini",
         "display": "Gemini CLI",
         "list_command": "gemini mcp list",
+    },
+    "goose": {
+        "binary": "goose",
+        "display": "Goose",
+        "list_command": "goose configure",
     },
     "opencode": {
         "binary": "opencode",
@@ -324,6 +329,9 @@ def configure_client_mcp_server(
         removed = remove_gemini_mcp_server(name)
         add_gemini_mcp_server(name, argv)
         return [MCP_USER_SCOPE] if removed else []
+    if client == "goose":
+        removed = goose.write_mcp_server_config(name, argv)
+        return [MCP_USER_SCOPE] if removed else []
     if client == "opencode":
         removed = opencode.write_mcp_server_config(name, argv)
         return [MCP_USER_SCOPE] if removed else []
@@ -343,6 +351,8 @@ def remove_client_mcp_server(client: str, name: str) -> list[str]:
         return [MCP_USER_SCOPE] if remove_codex_mcp_server(name) else []
     if client == "gemini":
         return [MCP_USER_SCOPE] if remove_gemini_mcp_server(name) else []
+    if client == "goose":
+        return [MCP_USER_SCOPE] if goose.remove_mcp_server_config(name) else []
     if client == "opencode":
         return [MCP_USER_SCOPE] if opencode.remove_mcp_server_config(name) else []
     if client == "copilot":

@@ -13,7 +13,7 @@ from ucode import mcp
 
 WS = "https://example.databricks.com"
 CLAUDE_STATE = {"workspace": WS, "available_tools": ["claude"]}
-ALL_MCP_CLIENTS = ["claude", "codex", "gemini", "opencode", "copilot"]
+ALL_MCP_CLIENTS = ["claude", "codex", "gemini", "goose", "opencode", "copilot"]
 
 
 class TestMcpChangeSummary:
@@ -297,6 +297,25 @@ class TestCursorMcpClient:
     def test_skipped_when_binary_not_installed(self):
         clients = mcp.configured_mcp_clients({"available_tools": ["claude"]}, ["claude"])
         assert "cursor" not in clients
+
+
+class TestGooseMcpClient:
+    def test_goose_registered_as_mcp_client(self):
+        assert mcp.MCP_CLIENTS["goose"]["binary"] == "goose"
+
+    def test_configure_dispatches_proxy_argv_to_goose_writer(self, monkeypatch):
+        calls: list[tuple[str, list[str]]] = []
+        monkeypatch.setattr(
+            mcp.goose,
+            "write_mcp_server_config",
+            lambda name, argv: calls.append((name, argv)) or False,
+        )
+        assert mcp.configure_client_mcp_server("goose", "github", GH_URL, WS, "p") == []
+        assert calls == [("github", _proxy_argv())]
+
+    def test_remove_dispatches_to_goose_remover(self, monkeypatch):
+        monkeypatch.setattr(mcp.goose, "remove_mcp_server_config", lambda name: True)
+        assert mcp.remove_client_mcp_server("goose", "github") == [mcp.MCP_USER_SCOPE]
 
 
 class TestConfigureClientMcpServer:
@@ -768,6 +787,7 @@ class TestConfigureMcpCommand:
                 ("claude", "github-mcp", f"{WS}/api/2.0/mcp/external/github-mcp"),
                 ("codex", "github-mcp", f"{WS}/api/2.0/mcp/external/github-mcp"),
                 ("gemini", "github-mcp", f"{WS}/api/2.0/mcp/external/github-mcp"),
+                ("goose", "github-mcp", f"{WS}/api/2.0/mcp/external/github-mcp"),
                 ("opencode", "github-mcp", f"{WS}/api/2.0/mcp/external/github-mcp"),
                 ("copilot", "github-mcp", f"{WS}/api/2.0/mcp/external/github-mcp"),
             ]
@@ -777,7 +797,7 @@ class TestConfigureMcpCommand:
                 "name": "github-mcp",
                 "url": f"{WS}/api/2.0/mcp/external/github-mcp",
                 "auth": "proxy",
-                "clients": ["claude", "codex", "gemini", "opencode", "copilot"],
+                "clients": ["claude", "codex", "gemini", "goose", "opencode", "copilot"],
             }
         ]
 

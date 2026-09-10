@@ -40,7 +40,7 @@ from ucode.ui import (
     spinner,
 )
 
-from . import claude, codex, copilot, gemini, opencode, pi
+from . import claude, codex, copilot, gemini, goose, opencode, pi
 from .args import LaunchOptions as LaunchOptions
 from .args import explicit_model_arg_value as explicit_model_arg_value
 
@@ -48,6 +48,7 @@ _MODULES = {
     "codex": codex,
     "claude": claude,
     "gemini": gemini,
+    "goose": goose,
     "opencode": opencode,
     "copilot": copilot,
     "pi": pi,
@@ -66,6 +67,7 @@ TOOL_ALIASES = {
     "claude-code": "claude",
     "gemini": "gemini",
     "gemini-cli": "gemini",
+    "goose": "goose",
     "opencode": "opencode",
     "copilot": "copilot",
     "pi": "pi",
@@ -105,7 +107,7 @@ def normalize_tool(tool: str) -> str:
     normalized = TOOL_ALIASES.get(tool.strip().lower())
     if not normalized:
         raise RuntimeError(
-            f"Unsupported tool '{tool}'. Use one of: codex, claude, gemini, opencode, copilot, pi."
+            f"Unsupported tool '{tool}'. Use one of: codex, claude, gemini, goose, opencode, copilot, pi."
         )
     return normalized
 
@@ -452,6 +454,8 @@ def configure_tool(
             raise RuntimeError(f"A {tool} model must be selected before configuration.")
         if tool == "gemini":
             result = gemini.write_tool_config(state, model, provider=provider)
+        elif tool == "goose":
+            result = goose.write_tool_config(state, model)
         elif tool == "copilot":
             result = copilot.write_tool_config(state, model)
         elif tool == "pi":
@@ -486,6 +490,8 @@ def check_gateway_endpoint(state: dict, tool: str) -> bool:
         return bool(state.get("gemini_models"))
     if tool == "copilot":
         return bool(state.get("claude_models")) or bool(state.get("codex_models"))
+    if tool == "goose":
+        return bool(state.get("claude_models")) or bool(state.get("gemini_models"))
     if tool == "pi":
         return (
             bool(state.get("claude_models"))
@@ -497,6 +503,7 @@ def check_gateway_endpoint(state: dict, tool: str) -> bool:
 
 _TOOL_DISCOVERY_SOURCES: dict[str, tuple[str, ...]] = {
     "claude": ("claude",),
+    "goose": ("claude", "gemini"),
     "opencode": ("claude", "gemini", "oss"),
     "codex": ("codex",),
     "gemini": ("gemini",),

@@ -8,6 +8,7 @@ from typing import TypedDict, cast
 
 import tomlkit
 import tomlkit.exceptions
+import yaml
 
 from ucode.ui import console
 
@@ -217,3 +218,25 @@ def parse_dotenv(path: Path) -> dict[str, str]:
 def write_dotenv(path: Path, env: dict[str, str]) -> None:
     content = "".join(f'{key}="{val}"\n' for key, val in env.items())
     write_text_file(path, content)
+
+
+def read_yaml_safe(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_yaml_file(path: Path, data: dict) -> None:
+    content = yaml.dump(data, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    if _dry_run:
+        console.print(f"\n[bold]\\[dry run] {path}[/bold]\n{content}")
+        return
+    ensure_parent_dir(path)
+    try:
+        path.write_text(content, encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"Failed to write config file: {path}") from exc

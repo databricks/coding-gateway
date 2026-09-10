@@ -152,9 +152,9 @@ from ucode.usage import usage as usage_report
 CustomOAuthConfig = custom_oauth.CustomOAuthConfig
 
 _DISCOVERY_CONSUMERS: dict[str, tuple[str, ...]] = {
-    "claude": ("claude", "opencode", "copilot", "pi"),
+    "claude": ("claude", "goose", "opencode", "copilot", "pi"),
     "codex": ("codex", "copilot", "pi"),
-    "gemini": ("gemini", "opencode", "pi"),
+    "gemini": ("gemini", "goose", "opencode", "pi"),
     "oss": ("opencode",),
 }
 
@@ -565,9 +565,16 @@ def configure_shared_state(
         print_warning(f"Model service: {model_service_probe.detail}")
 
     want_claude = (
-        fetch_all or "claude" in tools or "opencode" in tools or "copilot" in tools or "pi" in tools
+        fetch_all
+        or "claude" in tools
+        or "goose" in tools
+        or "opencode" in tools
+        or "copilot" in tools
+        or "pi" in tools
     )
-    want_gemini = fetch_all or "gemini" in tools or "opencode" in tools or "pi" in tools
+    want_gemini = (
+        fetch_all or "gemini" in tools or "goose" in tools or "opencode" in tools or "pi" in tools
+    )
     want_codex = fetch_all or "codex" in tools or "copilot" in tools or "pi" in tools
     # Codex smart routing can select OSS models such as GLM, so a Codex-only
     # configure must persist that discovered family too.
@@ -2193,7 +2200,7 @@ def _launch_tool(
                 f"{TOOL_SPECS[tool]['display']} may require one-time hook review. Open "
                 "`/hooks` and trust the ug routing hooks if prompted."
             )
-        if tool in ("gemini", "opencode", "copilot", "pi"):
+        if tool in ("gemini", "goose", "opencode", "copilot", "pi"):
             print_note(
                 f"{TOOL_SPECS[tool]['display']} token refresh is managed automatically "
                 f"every 30 minutes while the session is running."
@@ -2615,6 +2622,15 @@ def gemini_cmd(
     _launch_tool("gemini", ctx, provider=provider, model=model, skip_preflight=skip_preflight)
 
 
+@app.command("goose", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def goose_cmd(
+    ctx: typer.Context,
+    skip_preflight: SkipPreflightOption = False,
+) -> None:
+    """Launch Goose via Databricks."""
+    _launch_tool("goose", ctx, skip_preflight=skip_preflight)
+
+
 @app.command(
     "opencode", context_settings={"allow_extra_args": True, "ignore_unknown_options": True}
 )
@@ -2687,7 +2703,7 @@ def configure(
         str | None,
         typer.Option(
             "--agent",
-            help="Configure only the named agent (e.g. claude, codex, gemini, opencode, copilot, pi).",
+            help="Configure only the named agent (e.g. claude, codex, gemini, goose, opencode, copilot, pi).",
         ),
     ] = None,
     agents: Annotated[

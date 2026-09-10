@@ -2097,7 +2097,9 @@ class TestConfigureAgentFlag:
             result = runner.invoke(app, ["configure", "--agents", "claude,bogus"])
         assert result.exit_code != 0
         assert "Unsupported tool 'bogus'" in result.output
-        assert "codex, claude, gemini, opencode, copilot, pi" in " ".join(result.output.split())
+        assert "codex, claude, gemini, goose, opencode, copilot, pi" in " ".join(
+            result.output.split()
+        )
         mock_cfg.assert_not_called()
 
     def test_agents_flag_rejects_empty_list(self):

@@ -71,7 +71,15 @@ class TestProviderPermissionError:
 
 class TestToolSpecs:
     def test_all_tools_present(self):
-        assert set(TOOL_SPECS) == {"codex", "claude", "gemini", "opencode", "copilot", "pi"}
+        assert set(TOOL_SPECS) == {
+            "codex",
+            "claude",
+            "gemini",
+            "goose",
+            "opencode",
+            "copilot",
+            "pi",
+        }
 
     def test_each_spec_has_required_keys(self):
         required = {"binary", "package", "display", "config_path", "backup_path"}
@@ -189,6 +197,7 @@ class TestNormalizeTool:
             ("claude-code", "claude"),
             ("gemini", "gemini"),
             ("gemini-cli", "gemini"),
+            ("goose", "goose"),
             ("opencode", "opencode"),
             ("copilot", "copilot"),
             ("pi", "pi"),
@@ -211,6 +220,15 @@ class TestCheckGatewayEndpoint:
     def test_claude_unavailable_when_no_models(self):
         assert check_gateway_endpoint({"claude_models": {}}, "claude") is False
         assert check_gateway_endpoint({}, "claude") is False
+
+    def test_goose_available_with_claude(self):
+        assert check_gateway_endpoint({"claude_models": {"sonnet": "s4"}}, "goose") is True
+
+    def test_goose_unavailable_without_models(self):
+        assert check_gateway_endpoint({"codex_models": ["m"]}, "goose") is False
+
+    def test_goose_available_with_gemini(self):
+        assert check_gateway_endpoint({"gemini_models": ["gemini-pro"]}, "goose") is True
 
     def test_codex_available(self):
         assert check_gateway_endpoint({"codex_models": ["model-a"]}, "codex") is True

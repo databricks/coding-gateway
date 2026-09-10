@@ -52,11 +52,13 @@ from ucode.databricks import (
     discover_codex_models,
     discover_gemini_models,
     discover_model_services,
+    discover_opencode_models,
     ensure_databricks_auth,
     ensure_pat_bearer,
     find_profile_name_for_host,
     get_databricks_profiles,
     get_databricks_token,
+    has_cached_model_services,
     install_databricks_cli,
     is_model_provider_feature_unavailable,
     is_workspace_admin,
@@ -623,12 +625,25 @@ def configure_shared_state(
                     codex_models, codex_reason = discover_codex_models(workspace, token)
             if want_oss:
                 oss_models, oss_reason = ms_oss, ms_reason
-        if claude_models:
-            opencode_models["anthropic"] = list(claude_models.values())
-        if gemini_models:
-            opencode_models["gemini"] = gemini_models
-        if oss_models:
-            opencode_models["oss"] = oss_models
+            if (fetch_all or "opencode" in tools) and has_cached_model_services(workspace):
+                # OpenCode picks a model from a list, so give it every model the workspace serves,
+                # routed by the API dialect each one advertises. The family buckets above cannot
+                # answer this: they keep one id per Claude family (Claude Code pins one model per
+                # env-var alias) and match OSS models against a hardcoded name allowlist. Guarded on
+                # the warm cache so a workspace without UC model-services does not pay the listing's
+                # retry budget a second time — it falls through to the AI Gateway shape below.
+                opencode_models, _ = discover_opencode_models(
+                    workspace, token, fable_enabled=fable_enabled
+                )
+        if not opencode_models:
+            # No UC model-services on this workspace: build the buckets from whatever the per-family
+            # AI Gateway listings returned.
+            if claude_models:
+                opencode_models["anthropic"] = list(claude_models.values())
+            if gemini_models:
+                opencode_models["gemini"] = gemini_models
+            if oss_models:
+                opencode_models["oss"] = oss_models
 
     if skip_model_discovery:
         # Don't clobber any previously-discovered Databricks model lists; provider

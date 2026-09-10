@@ -416,6 +416,42 @@ class TestOpencodeDefaultModel:
         }
         assert opencode.default_model(state) == "admin-chosen-default"
 
+    def test_starts_on_the_claude_family_pin_not_the_list_order(self):
+        # The anthropic list is every Claude the workspace serves, plainly sorted, so its first
+        # entry is an accident of the alphabet. The boot model comes from the family pin instead.
+        state = {
+            "claude_models": {
+                "opus": "system.ai.claude-opus-5",
+                "sonnet": "system.ai.claude-sonnet-5",
+                "haiku": "system.ai.claude-haiku-4-5",
+            },
+            "opencode_models": {
+                "anthropic": [
+                    "system.ai.claude-haiku-4-5",
+                    "system.ai.claude-opus-5",
+                    "system.ai.claude-sonnet-4",
+                    "system.ai.claude-sonnet-5",
+                ]
+            },
+        }
+        assert opencode.default_model(state) == "system.ai.claude-opus-5"
+
+    def test_skips_a_pin_the_provider_does_not_list(self):
+        # A managed config can name a family model that never reached the bucket; an unlisted id
+        # has no provider prefix to resolve, so it cannot boot a session.
+        state = {
+            "claude_models": {"opus": "system.ai.claude-opus-5"},
+            "opencode_models": {"anthropic": ["system.ai.claude-sonnet-5"]},
+        }
+        assert opencode.default_model(state) == "system.ai.claude-sonnet-5"
+
+    def test_falls_back_to_the_list_when_no_claude_is_pinned(self):
+        state = {
+            "claude_models": {},
+            "opencode_models": {"oss": ["system.ai.llama-4-maverick"]},
+        }
+        assert opencode.default_model(state) == "system.ai.llama-4-maverick"
+
 
 class TestOpencodeValidateCmd:
     def test_starts_with_binary(self):

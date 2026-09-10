@@ -255,9 +255,24 @@ class TestDiscoverClaudeModels:
         assert models["fable"] == "databricks-claude-fable-5"
 
 
-def _model_service(model_id: str) -> dict:
-    """A model-services entry whose `name` strips to `model_id`."""
-    return {"name": f"model-services/{model_id}"}
+def _model_service(model_id: str, api_types: list[str] | None = None) -> dict:
+    """A model-services entry whose `name` strips to `model_id`.
+
+    `api_types` fills `supported_api_types`; omit it for the name-bucketing tests, which never
+    read it."""
+    service: dict = {"name": f"model-services/{model_id}"}
+    if api_types is not None:
+        service["supported_api_types"] = api_types
+    return service
+
+
+_ANTHROPIC_TYPES = ["mlflow/v1/chat/completions", "anthropic/v1/messages", "mlflow/v1/responses"]
+_OPENAI_TYPES = ["mlflow/v1/chat/completions", "mlflow/v1/responses"]
+_GEMINI_TYPES = ["gemini/v1/generateContent", "mlflow/v1/chat/completions"]
+_EMBEDDING_TYPES = ["mlflow/v1/embeddings"]
+# The gateway answers `/responses` with HTTP 400 for these, and `@ai-sdk/openai` only sends
+# `/responses` — see `system.ai.meta-llama-3-3-70b-instruct`.
+_CHAT_ONLY_TYPES = ["mlflow/v1/chat/completions"]
 
 
 class TestModelTokenLimits:
@@ -450,6 +465,178 @@ class TestDiscoverModelServices:
         assert reason is None
         assert ids == ["system.ai.gpt-5"]
         assert calls["n"] == 3  # two failures, third succeeds
+
+
+class TestDiscoverOpencodeModels:
+    def _listing(self, monkeypatch, services: list[dict]) -> None:
+        monkeypatch.setattr(
+            db_mod,
+            "_http_get_json",
+            lambda url, token, timeout=10: ({"model_services": services}, None),
+        )
+
+    def test_routes_each_model_by_advertised_dialect(self, monkeypatch):
+        self._listing(
+            monkeypatch,
+            [
+                _model_service("system.ai.claude-opus-5", _ANTHROPIC_TYPES),
+                _model_service("system.ai.gemini-3-flash", _GEMINI_TYPES),
+                _model_service("system.ai.gpt-oss-120b", _OPENAI_TYPES),
+            ],
+        )
+
+        buckets, reason = db_mod.discover_opencode_models(WS, "token")
+
+        assert reason is None
+        assert buckets == {
+            "anthropic": ["system.ai.claude-opus-5"],
+            "gemini": ["system.ai.gemini-3-flash"],
+            "oss": ["system.ai.gpt-oss-120b"],
+        }
+
+    def test_keeps_every_claude_version_not_just_the_newest_per_family(self, monkeypatch):
+        # The regression this function exists for: `discover_model_services` collapses these
+        # five ids to two (one per family), which hid models the workspace serves. Every version
+        # the gateway exposes belongs in the list so the user can pick one.
+        self._listing(
+            monkeypatch,
+            [
+                _model_service(f"system.ai.claude-{name}", _ANTHROPIC_TYPES)
+                for name in ("sonnet-5", "sonnet-4-6", "sonnet-4-5", "sonnet-4", "opus-5")
+            ],
+        )
+
+        buckets, reason = db_mod.discover_opencode_models(WS, "token")
+
+        assert reason is None
+        assert sorted(buckets["anthropic"]) == [
+            "system.ai.claude-opus-5",
+            "system.ai.claude-sonnet-4",
+            "system.ai.claude-sonnet-4-5",
+            "system.ai.claude-sonnet-4-6",
+            "system.ai.claude-sonnet-5",
+        ]
+
+    def test_keeps_oss_models_outside_the_name_allowlist(self, monkeypatch):
+        # llama/qwen/gemma match no `_OSS_MODEL_FAMILIES` entry, so name bucketing dropped them.
+        self._listing(
+            monkeypatch,
+            [
+                _model_service("system.ai.llama-4-maverick", _OPENAI_TYPES),
+                _model_service("system.ai.qwen35-122b-a10b", _OPENAI_TYPES),
+                _model_service("system.ai.gemma-3-12b", _OPENAI_TYPES),
+            ],
+        )
+
+        buckets, reason = db_mod.discover_opencode_models(WS, "token")
+
+        assert reason is None
+        assert sorted(buckets["oss"]) == [
+            "system.ai.gemma-3-12b",
+            "system.ai.llama-4-maverick",
+            "system.ai.qwen35-122b-a10b",
+        ]
+
+    def test_excludes_models_that_cannot_serve_the_responses_api(self, monkeypatch):
+        # `@ai-sdk/openai` sends `/responses` only, and the gateway 400s a chat-only model there.
+        # Listing it would put a model in the picker that breaks on first use.
+        self._listing(
+            monkeypatch,
+            [
+                _model_service("system.ai.gpt-oss-120b", _OPENAI_TYPES),
+                _model_service("system.ai.meta-llama-3-3-70b-instruct", _CHAT_ONLY_TYPES),
+            ],
+        )
+
+        buckets, reason = db_mod.discover_opencode_models(WS, "token")
+
+        assert reason is None
+        assert buckets == {"oss": ["system.ai.gpt-oss-120b"]}
+
+    def test_excludes_embedding_only_models(self, monkeypatch):
+        self._listing(
+            monkeypatch,
+            [
+                _model_service("system.ai.gpt-oss-120b", _OPENAI_TYPES),
+                _model_service("system.ai.gte-large-en", _EMBEDDING_TYPES),
+                _model_service("system.ai.qwen3-embedding-0-6b", _EMBEDDING_TYPES),
+            ],
+        )
+
+        buckets, reason = db_mod.discover_opencode_models(WS, "token")
+
+        assert reason is None
+        assert buckets == {"oss": ["system.ai.gpt-oss-120b"]}
+
+    def test_claude_prefers_the_anthropic_dialect_over_openai(self, monkeypatch):
+        # Claude advertises both; the native route preserves thinking blocks and prompt caching.
+        self._listing(monkeypatch, [_model_service("system.ai.claude-opus-5", _ANTHROPIC_TYPES)])
+
+        buckets, _ = db_mod.discover_opencode_models(WS, "token")
+
+        assert "oss" not in buckets
+        assert buckets["anthropic"] == ["system.ai.claude-opus-5"]
+
+    def test_fable_is_opt_in(self, monkeypatch):
+        services = [
+            _model_service("system.ai.claude-fable-5", _ANTHROPIC_TYPES),
+            _model_service("system.ai.claude-opus-5", _ANTHROPIC_TYPES),
+        ]
+        self._listing(monkeypatch, services)
+
+        without, _ = db_mod.discover_opencode_models(WS, "token")
+        db_mod.clear_model_services_cache()
+        with_fable, _ = db_mod.discover_opencode_models(WS, "token", fable_enabled=True)
+
+        assert without["anthropic"] == ["system.ai.claude-opus-5"]
+        assert sorted(with_fable["anthropic"]) == [
+            "system.ai.claude-fable-5",
+            "system.ai.claude-opus-5",
+        ]
+
+    def test_http_failure_returns_reason(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=10: (None, "HTTP 500 Server Error")
+        )
+
+        buckets, reason = db_mod.discover_opencode_models(WS, "token")
+
+        assert buckets == {}
+        assert reason == "HTTP 500 Server Error"
+
+    def test_no_routable_dialect_reports_sample(self, monkeypatch):
+        self._listing(monkeypatch, [_model_service("system.ai.gte-large-en", _EMBEDDING_TYPES)])
+
+        buckets, reason = db_mod.discover_opencode_models(WS, "token")
+
+        assert buckets == {}
+        assert reason is not None and "gte-large-en" in reason
+
+    def test_reuses_one_listing_walk(self, monkeypatch):
+        calls = {"n": 0}
+
+        def fake_get(url, token, timeout=10):
+            calls["n"] += 1
+            return {
+                "model_services": [_model_service("system.ai.claude-opus-5", _ANTHROPIC_TYPES)]
+            }, None
+
+        monkeypatch.setattr(db_mod, "_http_get_json", fake_get)
+
+        db_mod.discover_model_services(WS, "token")
+        assert db_mod.has_cached_model_services(WS) is True
+        db_mod.discover_opencode_models(WS, "token")
+
+        assert calls["n"] == 1
+
+    def test_no_cache_entry_when_the_listing_fails(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=10: (None, "HTTP 404 Not Found")
+        )
+
+        db_mod.discover_opencode_models(WS, "token")
+
+        assert db_mod.has_cached_model_services(WS) is False
 
 
 class TestModelServiceExists:

@@ -8,6 +8,7 @@ import pytest
 
 from ucode.databricks import (
     build_shared_base_urls,
+    discover_opencode_models,
     fetch_ai_gateway_claude_models,
     fetch_codex_models,
     fetch_gemini_models,
@@ -84,11 +85,17 @@ def e2e_state(e2e_workspace, e2e_token):
     gemini_models = fetch_gemini_models(e2e_workspace, e2e_token)
     codex_models = fetch_codex_models(e2e_workspace, e2e_token)
 
-    opencode_models: dict = {}
-    if claude_models:
-        opencode_models["anthropic"] = list(claude_models.values())
-    if gemini_models:
-        opencode_models["gemini"] = gemini_models
+    # Mirror configure_shared_state: route by advertised API dialect first, and fall back to the
+    # AI-Gateway per-family shape only when the workspace serves no UC model-services. Building the
+    # buckets from the per-family listings alone would make these tests exercise a path production
+    # no longer takes — and would skip them outright on a workspace whose AI-Gateway per-family
+    # routes list nothing while UC model-services lists every model.
+    opencode_models, _ = discover_opencode_models(e2e_workspace, e2e_token)
+    if not opencode_models:
+        if claude_models:
+            opencode_models["anthropic"] = list(claude_models.values())
+        if gemini_models:
+            opencode_models["gemini"] = gemini_models
 
     return {
         "workspace": e2e_workspace,

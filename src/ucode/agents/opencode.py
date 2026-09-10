@@ -19,6 +19,7 @@ from ucode.config_io import (
     write_text_file,
 )
 from ucode.databricks import (
+    ANTHROPIC_FAMILIES,
     build_auth_token_argv,
     build_opencode_base_urls,
     get_databricks_token,
@@ -361,17 +362,33 @@ def remove_mcp_server_config(name: str) -> bool:
 
 
 def default_model(state: dict) -> str | None:
+    """The model the first session starts on, until the user picks another in OpenCode.
+
+    The lists in ``opencode_models`` are complete and carry no ranking — every model the workspace
+    serves, for the user to choose from. Only the starting model needs a single answer, so take the
+    Claude family pin ucode already computes for Claude Code (``claude_models``, highest tier first)
+    rather than ranking the lists here. Falls back to any listed model when the workspace serves no
+    Claude, and an explicit ``opencode_default_model`` (set by a managed config) wins outright.
+    """
     if isinstance(state.get("opencode_default_model"), str):
         return state.get("opencode_default_model")
     opencode_models = state.get("opencode_models") or {}
     anthropic = opencode_models.get("anthropic") or []
-    if anthropic:
-        return anthropic[0]
-    gemini = opencode_models.get("gemini") or []
-    if gemini:
-        return gemini[0]
-    oss = opencode_models.get("oss") or []
-    return oss[0] if oss else None
+    claude_pins = state.get("claude_models") or {}
+    for family in ANTHROPIC_FAMILIES:
+        pin = claude_pins.get(family)
+        # Only a pin the anthropic provider actually lists is routable; a managed config can name
+        # a family model that never made it into the bucket.
+        if isinstance(pin, str) and pin in anthropic:
+            return pin
+    for models in (
+        anthropic,
+        opencode_models.get("gemini") or [],
+        opencode_models.get("oss") or [],
+    ):
+        if models:
+            return models[0]
+    return None
 
 
 def _configure_launch(state: dict) -> str:

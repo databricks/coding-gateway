@@ -1403,6 +1403,20 @@ _MODEL_SERVICE_PARENT_SCHEMA = "schemas/system.ai"
 # support a new family.
 _OSS_MODEL_FAMILIES = ("kimi-", "glm-", "deepseek-")
 
+# API dialects a model-service advertises in its `supported_api_types`. A model lists every dialect
+# its gateway route speaks, so these identify what a client may actually send — no name guessing
+# required. The gateway enforces the list exactly: `system.ai.meta-llama-3-3-70b-instruct` advertises
+# `mlflow/v1/chat/completions` only and answers `/responses` with HTTP 400, so a model must be
+# matched against the dialect its configured client really sends. Embedding-only models advertise
+# `mlflow/v1/embeddings` and none of these, which is how they get excluded.
+ANTHROPIC_MESSAGES_API = "anthropic/v1/messages"
+GEMINI_GENERATE_CONTENT_API = "gemini/v1/generateContent"
+# `@ai-sdk/openai` has spoken the Responses API from its default model instance since AI SDK 5, and
+# that is the instance OpenCode builds from `createOpenAI`. So the OpenAI-dialect bucket keys on
+# `responses`, NOT on the more widely advertised `chat/completions`: a chat-only model put in that
+# bucket would appear in the picker and then fail on first use.
+OPENAI_RESPONSES_API = "mlflow/v1/responses"
+
 # Claude model families ucode buckets, newest tier first. Each maps to a
 # Claude Code family alias (ANTHROPIC_DEFAULT_<FAMILY>_MODEL). Add an entry to
 # support a new family in both discovery paths (`claude-<family>-*` via the
@@ -1472,6 +1486,17 @@ def _model_service_id(service: dict) -> str | None:
     return name or None
 
 
+def _model_service_api_types(service: dict) -> list[str]:
+    """The API dialects one model-service entry advertises, or [] when it names none.
+
+    An entry without `supported_api_types` tells us nothing about what it can serve, so callers
+    that route on capability must skip it rather than assume a dialect."""
+    api_types = service.get("supported_api_types")
+    if not isinstance(api_types, list):
+        return []
+    return [t for t in api_types if isinstance(t, str)]
+
+
 # The model-services metastore listing REQUIRES a bounded `page_size`:
 # unparameterized or large-page requests (verified against
 # eng-ml-agent-platform.staging 2026-06-14) return `HTTP 499` with an empty
@@ -1503,13 +1528,14 @@ def _get_model_services_page(
     return payload, reason
 
 
-# Successful model-service listings for this process, keyed by workspace. The listing is a paginated
-# walk of the whole metastore catalog, and several callers want different views of the same result
-# (`discover_model_services` buckets it per family, `discover_claude_models_unbucketed` keeps the raw
-# Claude ids), so a single `ucode setup` run would otherwise page it twice. Cached per process, not
+# Successful model-service listings for this process, keyed by workspace, as {model id: api types}.
+# The listing is a paginated walk of the whole metastore catalog, and several callers want different
+# views of the same result (`discover_opencode_models` buckets it per API dialect,
+# `discover_model_services` per family name, `discover_claude_models_unbucketed` keeps the raw Claude
+# ids), so a single `ucode setup` run would otherwise page it several times. Cached per process, not
 # persisted: a long-lived process is not a thing here, and a new model appearing mid-command is not
 # worth a second walk. Failures are never cached, so a transient error still retries.
-_MODEL_SERVICES_CACHE: dict[str, list[str]] = {}
+_MODEL_SERVICES_CACHE: dict[str, dict[str, list[str]]] = {}
 
 # Same idea for the Model Provider Service listing (a different endpoint). It is workspace-wide and
 # filtered per agent afterwards, so `ucode setup` would otherwise re-list it once per MPS-capable
@@ -1524,6 +1550,18 @@ def clear_model_services_cache() -> None:
     _MODEL_PROVIDER_SERVICES_CACHE.clear()
 
 
+def has_cached_model_services(workspace: str) -> bool:
+    """True when the `system.ai` model-service listing for ``workspace`` already succeeded.
+
+    Only a non-empty listing is cached, because :func:`list_model_service_api_types` reports an
+    empty result as a failure rather than as an empty success. So this doubles as "the UC
+    model-services API returned models". Callers use it to skip a second view of the listing when
+    the first walk found none — without it, a workspace with no UC model-services would pay the
+    full retry budget again for a call that cannot succeed.
+    """
+    return workspace in _MODEL_SERVICES_CACHE
+
+
 def has_cached_model_provider_services(workspace: str, parent: str | None = None) -> bool:
     """True when :func:`list_model_provider_services` will answer from cache.
 
@@ -1534,24 +1572,28 @@ def has_cached_model_provider_services(workspace: str, parent: str | None = None
     return (workspace, parent or "") in _MODEL_PROVIDER_SERVICES_CACHE
 
 
-def list_model_services(
+def list_model_service_api_types(
     workspace: str,
     token: str,
     *,
     page_size: int = _MODEL_SERVICES_PAGE_SIZE,
     max_pages: int = 100,
     use_cache: bool = True,
-) -> tuple[list[str], str | None]:
-    """List all `system.ai.*` model ids via the UC model-services API.
+) -> tuple[dict[str, list[str]], str | None]:
+    """Map every `system.ai.*` model id to the API dialects it advertises.
 
     Pages through ``/api/2.1/unity-catalog/model-services`` scoped to the
     ``system.ai`` schema (``parent=schemas/system.ai``) with a bounded
-    ``page_size`` (the endpoint 499s without one) and returns the de-duplicated,
-    sorted list of ``system.ai.<model-name>`` ids. Returns (ids, reason); reason
-    is None on success, otherwise it describes why the list is empty (HTTP/network
-    error or no services). Scoping matters: the unscoped metastore listing walks
-    every schema across dozens of ~2s pages (~50s on a busy workspace) only to
-    keep the same ``system.ai.*`` subset — see ``_MODEL_SERVICE_PARENT_SCHEMA``.
+    ``page_size`` (the endpoint 499s without one). Returns (api_types, reason);
+    reason is None on success, otherwise it describes why the map is empty
+    (HTTP/network error or no services). Scoping matters: the unscoped metastore
+    listing walks every schema across dozens of ~2s pages (~50s on a busy
+    workspace) only to keep the same ``system.ai.*`` subset — see
+    ``_MODEL_SERVICE_PARENT_SCHEMA``.
+
+    Each entry's ``supported_api_types`` is the authoritative statement of what a
+    client may send it, so callers should route on this rather than guess from the
+    model name (see :func:`discover_opencode_models`).
 
     A successful result is memoized per workspace for the life of the process; pass
     ``use_cache=False`` to force a fresh walk.
@@ -1559,10 +1601,10 @@ def list_model_services(
     if use_cache:
         cached = _MODEL_SERVICES_CACHE.get(workspace)
         if cached is not None:
-            return list(cached), None
+            return {model: list(types) for model, types in cached.items()}, None
 
     hostname = workspace_hostname(workspace)
-    ids: list[str] = []
+    api_types: dict[str, list[str]] = {}
     page_token: str | None = None
     seen_tokens: set[str] = set()
     last_reason: str | None = None
@@ -1585,7 +1627,7 @@ def list_model_services(
             if isinstance(service, dict):
                 model_id = _model_service_id(service)
                 if model_id:
-                    ids.append(model_id)
+                    api_types[model_id] = _model_service_api_types(service)
         page_token = data.get("next_page_token") or None
         if not page_token:
             last_reason = None
@@ -1594,12 +1636,36 @@ def list_model_services(
             break
         seen_tokens.add(page_token)
 
-    deduped = sorted(set(ids))
-    if deduped:
+    if api_types:
         if use_cache:
-            _MODEL_SERVICES_CACHE[workspace] = list(deduped)
-        return deduped, None
-    return [], last_reason or "model-services listing returned no models"
+            _MODEL_SERVICES_CACHE[workspace] = {
+                model: list(types) for model, types in api_types.items()
+            }
+        return api_types, None
+    return {}, last_reason or "model-services listing returned no models"
+
+
+def list_model_services(
+    workspace: str,
+    token: str,
+    *,
+    page_size: int = _MODEL_SERVICES_PAGE_SIZE,
+    max_pages: int = 100,
+    use_cache: bool = True,
+) -> tuple[list[str], str | None]:
+    """The de-duplicated, sorted list of `system.ai.*` model ids on this workspace.
+
+    The names-only view of :func:`list_model_service_api_types`, for the callers
+    that bucket by name. Returns (ids, reason) with the same reason contract.
+    """
+    api_types, reason = list_model_service_api_types(
+        workspace,
+        token,
+        page_size=page_size,
+        max_pages=max_pages,
+        use_cache=use_cache,
+    )
+    return sorted(api_types), reason
 
 
 def _is_not_found_reason(reason: str | None) -> bool:
@@ -1753,6 +1819,68 @@ def discover_model_services(
             ),
         )
     return claude_models, codex_models, gemini_models, oss_models, None
+
+
+def discover_opencode_models(
+    workspace: str, token: str, *, fable_enabled: bool = False
+) -> tuple[dict[str, list[str]], str | None]:
+    """OpenCode's provider buckets, routed by each model's advertised API dialect.
+
+    Returns (buckets, reason) where buckets maps OpenCode's provider keys
+    (``anthropic``/``gemini``/``oss``) to every model on the workspace that provider can serve:
+
+    - ``anthropic`` — models advertising ``anthropic/v1/messages`` (`@ai-sdk/anthropic`).
+    - ``gemini`` — models advertising ``gemini/v1/generateContent`` (`@ai-sdk/google`).
+    - ``oss`` — models advertising ``mlflow/v1/responses`` (`@ai-sdk/openai`).
+
+    A model that advertises none of those three dialects is dropped, not bucketed.
+
+    Each bucket keys on the dialect its provider's npm package actually sends, so a listed model
+    always works. That is why ``oss`` keys on ``responses`` rather than ``chat/completions``: it costs
+    the few chat-only models (the older Llama 3.x instruct pair), which is better than listing a
+    model that answers OpenCode's first request with HTTP 400.
+
+    Unlike :func:`discover_model_services`, this keeps EVERY servable model rather than one id per
+    family. That function's shape exists for Claude Code, which pins exactly one model per
+    ``ANTHROPIC_DEFAULT_<FAMILY>_MODEL`` alias; OpenCode lists models in a picker, so collapsing to
+    the newest per family only hid models the workspace serves. Sonnet 4, 4.5, 4.6 and 5 all belong
+    in the list, and which one to use is the user's call.
+
+    Routing on the dialect instead of the model name also means a newly-added family (Grok, a new
+    Llama, a new Qwen) appears without a code change, and that embedding-only models are excluded
+    because they advertise no chat dialect — not because their names happen to miss an allowlist.
+
+    Each list is plainly sorted, and the order carries no ranking: OpenCode receives these as a JSON
+    object per provider and orders its own picker. Claude checks first because Claude models
+    advertise both the Anthropic and the OpenAI dialect, and the native one preserves thinking blocks
+    and prompt caching. Fable is opt-in via ``fable_enabled`` for the same reason it is elsewhere: it
+    must not reach a config unasked.
+    """
+    api_types, reason = list_model_service_api_types(workspace, token)
+    if not api_types:
+        return {}, reason
+
+    buckets: dict[str, list[str]] = {}
+    for model_id, types in api_types.items():
+        if ANTHROPIC_MESSAGES_API in types:
+            if not fable_enabled and "claude-fable-" in model_id:
+                continue
+            buckets.setdefault("anthropic", []).append(model_id)
+        elif GEMINI_GENERATE_CONTENT_API in types:
+            buckets.setdefault("gemini", []).append(model_id)
+        elif OPENAI_RESPONSES_API in types:
+            buckets.setdefault("oss", []).append(model_id)
+
+    if not buckets:
+        sample = ", ".join(sorted(api_types)[:5])
+        return {}, (
+            "model-services returned models but none advertise a chat dialect OpenCode can "
+            f"route (got: {sample})"
+        )
+
+    for models in buckets.values():
+        models.sort()
+    return buckets, None
 
 
 # --- Managed coding-agent config (admin-authored, developer-read) -----------

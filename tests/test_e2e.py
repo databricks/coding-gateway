@@ -225,7 +225,7 @@ class TestUrlBuilders:
 
     def test_shared_base_urls_all_tools(self, e2e_workspace):
         urls = build_shared_base_urls(e2e_workspace)
-        for tool in ("codex", "claude", "gemini", "opencode", "copilot", "pi"):
+        for tool in ("codex", "claude", "gemini", "opencode", "copilot", "pi", "omp"):
             assert tool in urls
 
 

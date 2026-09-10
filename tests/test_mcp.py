@@ -299,6 +299,42 @@ class TestCursorMcpClient:
         assert "cursor" not in clients
 
 
+class TestOmpMcpClient:
+    def test_omp_registered_without_list_command(self):
+        # omp exposes no `mcp list` subcommand; status output skips the
+        # list row when the key is absent.
+        assert "omp" in mcp.MCP_CLIENTS
+        assert mcp.MCP_CLIENTS["omp"]["binary"] == "omp"
+        assert "list_command" not in mcp.MCP_CLIENTS["omp"]
+
+    def test_configure_dispatches_proxy_argv_to_omp_writer(self, monkeypatch):
+        calls: list[tuple[str, list[str]]] = []
+        monkeypatch.setattr(
+            mcp.omp,
+            "write_mcp_server_config",
+            lambda name, argv: calls.append((name, argv)) or False,
+        )
+
+        removed_scopes = mcp.configure_client_mcp_server("omp", "github", GH_URL, WS, "p")
+
+        assert removed_scopes == []
+        assert calls == [("github", _proxy_argv())]
+
+    def test_configure_reports_user_scope_on_replace(self, monkeypatch):
+        monkeypatch.setattr(mcp.omp, "write_mcp_server_config", lambda name, argv: True)
+        assert mcp.configure_client_mcp_server("omp", "github", GH_URL, WS, "p") == [
+            mcp.MCP_USER_SCOPE
+        ]
+
+    def test_remove_dispatches_to_omp_writer(self, monkeypatch):
+        calls: list[str] = []
+        monkeypatch.setattr(
+            mcp.omp, "remove_mcp_server_config", lambda name: calls.append(name) or True
+        )
+        assert mcp.remove_client_mcp_server("omp", "github-mcp") == [mcp.MCP_USER_SCOPE]
+        assert calls == ["github-mcp"]
+
+
 class TestConfigureClientMcpServer:
     def test_configures_copilot_with_proxy_argv(self, monkeypatch):
         calls: list[tuple[str, list[str]]] = []
@@ -2634,7 +2670,7 @@ class TestRevertMcpConfigs:
                 "mcp_servers": [
                     {
                         "name": "github-mcp",
-                        "clients": ["claude", "codex", "gemini", "opencode", "copilot"],
+                        "clients": ["claude", "codex", "gemini", "opencode", "copilot", "omp"],
                     }
                 ]
             }
@@ -2646,9 +2682,11 @@ class TestRevertMcpConfigs:
             ("gemini", "github-mcp"),
             ("opencode", "github-mcp"),
             ("copilot", "github-mcp"),
+            ("omp", "github-mcp"),
         ]
         assert restored == [
-            (mcp.copilot.COPILOT_MCP_CONFIG_PATH, mcp.copilot.COPILOT_MCP_BACKUP_PATH, True)
+            (mcp.copilot.COPILOT_MCP_CONFIG_PATH, mcp.copilot.COPILOT_MCP_BACKUP_PATH, True),
+            (mcp.omp.OMP_MCP_PATH, mcp.omp.OMP_MCP_BACKUP_PATH, True),
         ]
         assert result == {
             "claude": True,
@@ -2656,6 +2694,7 @@ class TestRevertMcpConfigs:
             "gemini": True,
             "opencode": True,
             "copilot": True,
+            "omp": True,
         }
 
     def test_removes_skills_registry_across_its_clients(self, monkeypatch):

@@ -98,7 +98,9 @@ BUDGET_POLICY_BLURB = (
 # Agents not offered in `ug setup`'s picker, even when the workspace serves their models.
 # `ug gemini` still works as a launch target; it's just not part of the managed config authored
 # here. Serialize/validate keep supporting it, so a `--from-file` manifest can still name it.
-SETUP_EXCLUDED_AGENTS = frozenset({"gemini"})
+# `omp` has no managed-config support at all (the server proto has no omp agent variant), so it
+# is excluded too — `ug omp` remains a regular launch target.
+SETUP_EXCLUDED_AGENTS = frozenset({"gemini", "omp"})
 
 
 def _tracing_table_from_state(state: dict) -> str | None:

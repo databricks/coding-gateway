@@ -62,6 +62,9 @@ _AGENT_MODEL_FAMILIES: dict[str, tuple[str, ...]] = {
     "opencode": ("claude", "codex", "gemini", "oss"),
     "pi": ("claude", "codex", "gemini", "oss"),
     "copilot": ("claude", "codex", "gemini", "oss"),
+    # omp mirrors pi (the multi-provider harness); it is still excluded from the
+    # setup picker (see SETUP_EXCLUDED_AGENTS) since the server has no omp variant.
+    "omp": ("claude", "codex", "gemini", "oss"),
 }
 
 

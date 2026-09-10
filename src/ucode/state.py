@@ -197,6 +197,7 @@ def build_agent_state(state: dict) -> dict[str, dict]:
     )
     codex_model = default_model_for_tool("codex", selection_state)
     pi_model = default_model_for_tool("pi", selection_state)
+    omp_model = default_model_for_tool("omp", selection_state)
 
     agents: dict[str, dict] = {
         "claude": {
@@ -227,6 +228,12 @@ def build_agent_state(state: dict) -> dict[str, dict]:
         "pi": {
             "model": pi_model,
             "base_urls": base_urls.get("pi") if isinstance(base_urls.get("pi"), dict) else {},
+            "auth_command": auth_command,
+            "auth_refresh_interval_ms": AUTH_REFRESH_INTERVAL_MS,
+        },
+        "omp": {
+            "model": omp_model,
+            "base_urls": base_urls.get("omp") if isinstance(base_urls.get("omp"), dict) else {},
             "auth_command": auth_command,
             "auth_refresh_interval_ms": AUTH_REFRESH_INTERVAL_MS,
         },

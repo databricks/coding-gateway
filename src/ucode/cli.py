@@ -43,6 +43,7 @@ from ucode.agents import (
 )
 from ucode.agents.args import has_explicit_model_arg
 from ucode.agents.codex import revert_legacy_shared_config
+from ucode.agents.omp import OMP_CONFIG_BACKUP_PATH, OMP_CONFIG_PATH
 from ucode.agents.pi import PI_SETTINGS_BACKUP_PATH, PI_SETTINGS_PATH
 from ucode.config_io import is_dry_run, restore_file, set_dry_run
 from ucode.databricks import (
@@ -152,9 +153,9 @@ from ucode.usage import usage as usage_report
 CustomOAuthConfig = custom_oauth.CustomOAuthConfig
 
 _DISCOVERY_CONSUMERS: dict[str, tuple[str, ...]] = {
-    "claude": ("claude", "opencode", "copilot", "pi"),
-    "codex": ("codex", "copilot", "pi"),
-    "gemini": ("gemini", "opencode", "pi"),
+    "claude": ("claude", "opencode", "copilot", "pi", "omp"),
+    "codex": ("codex", "copilot", "pi", "omp"),
+    "gemini": ("gemini", "opencode", "pi", "omp"),
     "oss": ("opencode",),
 }
 
@@ -565,10 +566,19 @@ def configure_shared_state(
         print_warning(f"Model service: {model_service_probe.detail}")
 
     want_claude = (
-        fetch_all or "claude" in tools or "opencode" in tools or "copilot" in tools or "pi" in tools
+        fetch_all
+        or "claude" in tools
+        or "opencode" in tools
+        or "copilot" in tools
+        or "pi" in tools
+        or "omp" in tools
     )
-    want_gemini = fetch_all or "gemini" in tools or "opencode" in tools or "pi" in tools
-    want_codex = fetch_all or "codex" in tools or "copilot" in tools or "pi" in tools
+    want_gemini = (
+        fetch_all or "gemini" in tools or "opencode" in tools or "pi" in tools or "omp" in tools
+    )
+    want_codex = (
+        fetch_all or "codex" in tools or "copilot" in tools or "pi" in tools or "omp" in tools
+    )
     # Codex smart routing can select OSS models such as GLM, so a Codex-only
     # configure must persist that discovered family too.
     want_oss = fetch_all or "opencode" in tools or "codex" in tools
@@ -969,7 +979,8 @@ def status() -> int:
                 and server.get("name")
                 and server.get("kind") != SKILLS_MCP_KIND
             ]
-            print_kv("MCP list command", str(MCP_CLIENTS[tool]["list_command"]))
+            if MCP_CLIENTS[tool].get("list_command"):
+                print_kv("MCP list command", str(MCP_CLIENTS[tool]["list_command"]))
             print_kv(
                 "MCP servers",
                 ", ".join(tool_mcp_servers) if tool_mcp_servers else "none saved by ug",
@@ -1052,6 +1063,9 @@ def revert() -> int:
     pi_settings_restored = restore_file(
         PI_SETTINGS_PATH, PI_SETTINGS_BACKUP_PATH, bool(managed_configs.get("pi"))
     )
+    omp_config_restored = restore_file(
+        OMP_CONFIG_PATH, OMP_CONFIG_BACKUP_PATH, bool(managed_configs.get("omp"))
+    )
     # Older Codex (< 0.134.0) had ucode edit the shared ~/.codex/config.toml in
     # place; restoring the per-profile file above does not undo that.
     legacy_codex_stripped = revert_legacy_shared_config()
@@ -1066,6 +1080,7 @@ def revert() -> int:
     print_kv("Claude Code OS-managed settings", claude_managed_result)
     print_kv("Codex OS-managed settings", codex_managed_result)
     print_kv("Pi settings", "restored" if pi_settings_restored else "unchanged")
+    print_kv("Oh My Pi config", "restored" if omp_config_restored else "unchanged")
     for client, spec in MCP_CLIENTS.items():
         print_kv(
             f"{spec['display']} MCP config",
@@ -2190,7 +2205,7 @@ def _launch_tool(
                 f"{TOOL_SPECS[tool]['display']} may require one-time hook review. Open "
                 "`/hooks` and trust the ug routing hooks if prompted."
             )
-        if tool in ("gemini", "opencode", "copilot", "pi"):
+        if tool in ("gemini", "opencode", "copilot", "pi", "omp"):
             print_note(
                 f"{TOOL_SPECS[tool]['display']} token refresh is managed automatically "
                 f"every 30 minutes while the session is running."
@@ -2639,6 +2654,15 @@ def pi_cmd(
 ) -> None:
     """Launch Pi coding agent via Databricks."""
     _launch_tool("pi", ctx, skip_preflight=skip_preflight)
+
+
+@app.command("omp", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def omp_cmd(
+    ctx: typer.Context,
+    skip_preflight: SkipPreflightOption = False,
+) -> None:
+    """Launch Oh My Pi coding agent via Databricks."""
+    _launch_tool("omp", ctx, skip_preflight=skip_preflight)
 
 
 @app.command("cursor", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})

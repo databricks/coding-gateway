@@ -23,6 +23,7 @@ dependencies = [
   # request, via the SDK's stdio server + streamable-HTTP client. Works against
   # both mcp 1.x (httpx) and mcp 2.x (httpx2) — see mcp_proxy for the shared path.
   "mcp>=1.28.0",
+  "pyyaml>=6.0.0",
   "questionary>=2.0.0",
   "tomlkit>=0.13.0",
   "typer>=0.26.0",

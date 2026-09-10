@@ -71,7 +71,7 @@ class TestProviderPermissionError:
 
 class TestToolSpecs:
     def test_all_tools_present(self):
-        assert set(TOOL_SPECS) == {"codex", "claude", "gemini", "opencode", "copilot", "pi"}
+        assert set(TOOL_SPECS) == {"codex", "claude", "gemini", "opencode", "copilot", "pi", "omp"}
 
     def test_each_spec_has_required_keys(self):
         required = {"binary", "package", "display", "config_path", "backup_path"}
@@ -123,9 +123,9 @@ class TestInstallAiToolsForAgents:
 
     def test_maps_supported_tools_and_drops_others(self, monkeypatch):
         captured = self._capture(monkeypatch)
-        # Gemini and Pi aren't supported by `databricks aitools`, so they drop.
+        # Gemini, Pi, and Oh My Pi aren't supported by `databricks aitools`, so they drop.
         install_databricks_ai_tools_for_agents(
-            ["claude", "codex", "gemini", "pi"], {"profile": "prof"}
+            ["claude", "codex", "gemini", "pi", "omp"], {"profile": "prof"}
         )
         assert captured == {"agents": ["claude-code", "codex"], "profile": "prof"}
 
@@ -192,6 +192,8 @@ class TestNormalizeTool:
             ("opencode", "opencode"),
             ("copilot", "copilot"),
             ("pi", "pi"),
+            ("omp", "omp"),
+            ("oh-my-pi", "omp"),
             ("CODEX", "codex"),
             ("  Claude  ", "claude"),
         ],
@@ -247,6 +249,18 @@ class TestCheckGatewayEndpoint:
     def test_pi_unavailable_when_no_models(self):
         assert check_gateway_endpoint({}, "pi") is False
 
+    def test_omp_available_with_claude(self):
+        assert check_gateway_endpoint({"claude_models": {"sonnet": "s4"}}, "omp") is True
+
+    def test_omp_available_with_codex(self):
+        assert check_gateway_endpoint({"codex_models": ["m"]}, "omp") is True
+
+    def test_omp_available_with_gemini(self):
+        assert check_gateway_endpoint({"gemini_models": ["gemini-2"]}, "omp") is True
+
+    def test_omp_unavailable_when_no_models(self):
+        assert check_gateway_endpoint({}, "omp") is False
+
 
 class TestDefaultModelForTool:
     def test_codex_returns_none_without_a_configured_model(self):
@@ -300,6 +314,21 @@ class TestDefaultModelForTool:
 
     def test_pi_returns_none_when_no_models(self):
         assert default_model_for_tool("pi", {}) is None
+
+    def test_omp_prefers_claude_opus(self):
+        state = {"claude_models": {"opus": "o4", "sonnet": "s4"}, "codex_models": ["c"]}
+        assert default_model_for_tool("omp", state) == "o4"
+
+    def test_omp_falls_back_to_codex(self):
+        state = {"claude_models": {}, "codex_models": ["c1"]}
+        assert default_model_for_tool("omp", state) == "c1"
+
+    def test_omp_falls_back_to_gemini(self):
+        state = {"claude_models": {}, "codex_models": [], "gemini_models": ["gemini-2"]}
+        assert default_model_for_tool("omp", state) == "gemini-2"
+
+    def test_omp_returns_none_when_no_models(self):
+        assert default_model_for_tool("omp", {}) is None
 
 
 class TestResolveLaunchModel:

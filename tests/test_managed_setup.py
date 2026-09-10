@@ -326,12 +326,17 @@ class TestModelOptions:
         ]
 
     def test_multi_provider_agents_see_everything(self):
-        for tool in ("opencode", "pi", "copilot"):
+        for tool in ("opencode", "pi", "copilot", "omp"):
             options = model_options_for_agent(tool, STATE)
             assert "system.ai.claude-opus-4-8" in options, tool
             assert "system.ai.gpt-5-6" in options, tool
             assert "system.ai.gemini-3-flash" in options, tool
             assert "system.ai.kimi-k2-6" in options, tool
+
+    def test_omp_matches_pi_options(self):
+        # omp is the same multi-provider harness as pi; the setup picker
+        # excludes it, but any residual path must offer pi-identical options.
+        assert model_options_for_agent("omp", STATE) == model_options_for_agent("pi", STATE)
 
     def test_empty_state_yields_no_options(self):
         assert model_options_for_agent("claude", {}) == []

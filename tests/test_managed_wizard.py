@@ -2991,3 +2991,20 @@ class TestCliWiring:
 def _out(result) -> str:
     """CliRunner output with stderr folded in, since print_err writes to a stderr console."""
     return result.output + (result.stderr if result.stderr_bytes else "")
+
+
+class TestSetupExcludedAgents:
+    def test_omp_is_excluded_from_the_setup_picker(self):
+        # The server proto has no omp agent variant, so the managed-setup
+        # picker must never offer it even when the workspace serves omp's
+        # models (the picker's `available` filter honors this set).
+        assert "omp" in wizard.SETUP_EXCLUDED_AGENTS
+        assert "gemini" in wizard.SETUP_EXCLUDED_AGENTS
+
+    def test_omp_would_otherwise_pass_the_gateway_gate(self):
+        # Guard against a vacuous exclusion: with models discovered, omp
+        # clears the gateway check, so the exclusion set is what keeps it
+        # out of the picker.
+        from ucode.agents import check_gateway_endpoint
+
+        assert check_gateway_endpoint(STATE, "omp") is True

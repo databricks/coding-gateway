@@ -3386,6 +3386,8 @@ def build_tool_base_url(tool: str, workspace: str) -> str:
         )
     if tool == "pi":
         raise RuntimeError("Pi has multiple base URLs — use build_pi_base_urls() instead.")
+    if tool == "omp":
+        raise RuntimeError("Oh My Pi has multiple base URLs — use build_pi_base_urls() instead.")
     raise RuntimeError(f"Unsupported tool '{tool}'.")
 
 
@@ -3432,5 +3434,6 @@ def build_shared_base_urls(workspace: str) -> dict[str, str | dict[str, str]]:
         "opencode": build_opencode_base_urls(workspace),
         "copilot": build_copilot_base_url(workspace),
         "pi": build_pi_base_urls(workspace),
+        "omp": build_pi_base_urls(workspace),
     }
     return urls

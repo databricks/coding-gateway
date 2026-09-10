@@ -36,6 +36,11 @@ FAKE_URLS = {
         "openai": f"{FAKE_WS}/ai-gateway/codex/v1",
         "gemini": f"{FAKE_WS}/ai-gateway/gemini/v1beta",
     },
+    "omp": {
+        "claude": f"{FAKE_WS}/ai-gateway/anthropic",
+        "openai": f"{FAKE_WS}/ai-gateway/codex/v1",
+        "gemini": f"{FAKE_WS}/ai-gateway/gemini/v1beta",
+    },
 }
 
 
@@ -125,6 +130,7 @@ class TestSaveLoadRoundTrip:
         assert persisted["codex_models"][0] == "system.ai.gpt-5"
         assert "model" not in persisted["agents"]["codex"]
         assert persisted["agents"]["pi"]["model"] == "system.ai.gpt-5"
+        assert persisted["agents"]["omp"]["model"] == "system.ai.gpt-5"
 
     def test_save_respects_dry_run(self):
         import ucode.config_io as config_io_mod
@@ -229,6 +235,8 @@ class TestHydrateState:
         assert codex_auth["args"][0] == "auth-token"
         assert result["agents"]["pi"]["model"] == "claude-opus"
         assert result["agents"]["pi"]["base_urls"] == FAKE_URLS["pi"]
+        assert result["agents"]["omp"]["model"] == "claude-opus"
+        assert result["agents"]["omp"]["base_urls"] == FAKE_URLS["omp"]
 
     def test_normalizes_managed_configs_dict_entry(self):
         state = {"managed_configs": {"claude": {"keys": [["env", "X"]]}}}
@@ -263,7 +271,7 @@ class TestBuildAgentState:
         )
         # --use-pat threads through to the `ucode auth-token --use-pat` helper,
         # which resolves the static PAT internally on every platform.
-        for agent in ("claude", "codex", "pi"):
+        for agent in ("claude", "codex", "pi", "omp"):
             assert "--use-pat" in result[agent]["auth_command"]
             assert "--profile DEFAULT" in result[agent]["auth_command"]
 

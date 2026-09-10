@@ -26,7 +26,7 @@ from questionary.prompts.common import InquirerControl
 from questionary.question import Question
 from questionary.styles import merge_styles_default
 
-from ucode.agents import copilot, cursor, gemini, opencode
+from ucode.agents import copilot, cursor, gemini, omp, opencode
 from ucode.config_io import restore_file
 from ucode.databricks import (
     apply_pat_environment,
@@ -97,6 +97,12 @@ MCP_CLIENTS = {
         "binary": "cursor-agent",
         "display": "Cursor",
         "list_command": "cursor-agent mcp list",
+    },
+    "omp": {
+        # No list_command: omp exposes no `mcp list` subcommand; status
+        # output skips the list row when the key is absent.
+        "binary": "omp",
+        "display": "Oh My Pi",
     },
 }
 SKILLS_MCP_KIND = "skills"
@@ -330,6 +336,9 @@ def configure_client_mcp_server(
     if client == "cursor":
         removed = cursor.write_mcp_server_config(name, argv)
         return [MCP_USER_SCOPE] if removed else []
+    if client == "omp":
+        removed = omp.write_mcp_server_config(name, argv)
+        return [MCP_USER_SCOPE] if removed else []
     raise RuntimeError(f"Unsupported MCP client '{client}'.")
 
 
@@ -346,6 +355,8 @@ def remove_client_mcp_server(client: str, name: str) -> list[str]:
         return [MCP_USER_SCOPE] if copilot.remove_mcp_server_config(name) else []
     if client == "cursor":
         return [MCP_USER_SCOPE] if cursor.remove_mcp_server_config(name) else []
+    if client == "omp":
+        return [MCP_USER_SCOPE] if omp.remove_mcp_server_config(name) else []
     raise RuntimeError(f"Unsupported MCP client '{client}'.")
 
 
@@ -376,6 +387,13 @@ def revert_mcp_configs(state: dict) -> dict[str, bool]:
             "copilot" in (server.get("clients") or []) for server in state.get("mcp_servers") or []
         ),
     ) or results.get("copilot", False)
+    # omp stores MCP servers in a separate mcp.json like Copilot, so restore
+    # its original file after removing per-server entries above.
+    results["omp"] = restore_file(
+        omp.OMP_MCP_PATH,
+        omp.OMP_MCP_BACKUP_PATH,
+        any("omp" in (server.get("clients") or []) for server in state.get("mcp_servers") or []),
+    ) or results.get("omp", False)
     return results
 
 
@@ -1687,7 +1705,7 @@ def setup_mcp_clients(
     if not installed_clients:
         raise RuntimeError(
             "No supported MCP clients are installed. Install Claude, Codex, Gemini, OpenCode, "
-            "or GitHub Copilot CLI."
+            "GitHub Copilot CLI, or Oh My Pi."
         )
     clients = configured_mcp_clients(state, installed_clients)
     if agents is not None:
@@ -1701,7 +1719,7 @@ def setup_mcp_clients(
     if not clients:
         raise RuntimeError(
             "No configured MCP-capable coding agents are installed. Run `ucode configure` "
-            "for Codex, Claude, Gemini, OpenCode, or GitHub Copilot CLI first."
+            "for Codex, Claude, Gemini, OpenCode, GitHub Copilot CLI, or Oh My Pi first."
         )
     configured_tools = set(state.get("available_tools") or [])
     missing_clients = [

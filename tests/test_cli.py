@@ -1774,6 +1774,7 @@ class TestAutoConfigureOnFirstRun:
         ("opencode", "Launching OpenCode with Unity Gateway"),
         ("copilot", "Launching GitHub Copilot CLI with Unity Gateway"),
         ("pi", "Launching Pi with Unity Gateway"),
+        ("omp", "Launching Oh My Pi with Unity Gateway"),
     ],
 )
 def test_launch_title(tool, expected):
@@ -3257,7 +3258,7 @@ class TestSkipPreflightFlag:
     """`--skip-preflight` on a launch command threads through _launch_tool to
     configure_shared_state as skip_preflight."""
 
-    LAUNCH_TOOLS = ["codex", "claude", "gemini", "opencode", "copilot", "pi"]
+    LAUNCH_TOOLS = ["codex", "claude", "gemini", "opencode", "copilot", "pi", "omp"]
 
     @staticmethod
     def _patches(cfg):

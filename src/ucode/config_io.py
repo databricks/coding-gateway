@@ -8,8 +8,32 @@ from typing import TypedDict, cast
 
 import tomlkit
 import tomlkit.exceptions
+import yaml
 
 from ucode.ui import console
+
+
+def read_yaml_safe(path: Path) -> dict:
+    # Same contract as read_json_safe: missing/unreadable/invalid → {}.
+    try:
+        if not path.exists():
+            return {}
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_yaml_file(path: Path, payload: dict) -> None:
+    content = yaml.safe_dump(payload, sort_keys=False)
+    if _dry_run:
+        console.print(f"\n[bold]\\[dry run] {path}[/bold]\n{content}")
+        return
+    ensure_parent_dir(path)
+    try:
+        path.write_text(content, encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"Failed to write config file: {path}") from exc
 
 
 class ToolSpec(TypedDict):

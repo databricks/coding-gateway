@@ -17,12 +17,14 @@ from ucode.config_io import (
     prune_key_paths,
     read_json_safe,
     read_toml_safe,
+    read_yaml_safe,
     restore_file,
     set_dry_run,
     write_dotenv,
     write_json_file,
     write_text_file,
     write_toml_file,
+    write_yaml_file,
 )
 
 
@@ -172,6 +174,17 @@ class TestWriteHelpers:
         write_json_file(p, {"a": 1})
         assert not p.exists()
 
+    def test_write_yaml_file(self, tmp_path):
+        p = tmp_path / "out.yml"
+        write_yaml_file(p, {"a": 1})
+        assert "a: 1" in p.read_text()
+
+    def test_write_yaml_file_dry_run_no_write(self, tmp_path):
+        set_dry_run(True)
+        p = tmp_path / "out.yml"
+        write_yaml_file(p, {"a": 1})
+        assert not p.exists()
+
     def test_write_toml_file(self, tmp_path):
         p = tmp_path / "out.toml"
         doc = tomlkit.document()
@@ -219,6 +232,25 @@ class TestReadHelpers:
         p = tmp_path / "arr.json"
         p.write_text("[1, 2, 3]", encoding="utf-8")
         assert read_json_safe(p) == {}
+
+    def test_read_yaml_safe_missing_file(self, tmp_path):
+        result = read_yaml_safe(tmp_path / "missing.yml")
+        assert result == {}
+
+    def test_read_yaml_safe_valid(self, tmp_path):
+        p = tmp_path / "data.yml"
+        p.write_text("x: 1\n", encoding="utf-8")
+        assert read_yaml_safe(p) == {"x": 1}
+
+    def test_read_yaml_safe_invalid_yaml(self, tmp_path):
+        p = tmp_path / "bad.yml"
+        p.write_text("not: [unclosed\n  bad indent: }", encoding="utf-8")
+        assert read_yaml_safe(p) == {}
+
+    def test_read_yaml_safe_non_dict(self, tmp_path):
+        p = tmp_path / "arr.yml"
+        p.write_text("- 1\n- 2\n", encoding="utf-8")
+        assert read_yaml_safe(p) == {}
 
     def test_read_toml_safe_missing_file(self, tmp_path):
         doc = read_toml_safe(tmp_path / "missing.toml")

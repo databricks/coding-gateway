@@ -15,6 +15,9 @@ from ucode.databricks import build_auth_token_argv
 from ucode.smart_routing import hooks
 
 ROUTING_HOOK_COMMAND_MARKER = "claude-router-hook"
+ROUTE_FIRST_PROMPT_EVENT = "route-first-prompt"
+FIRST_PROMPT_HOOK_MARKER = f"{ROUTING_HOOK_COMMAND_MARKER} {ROUTE_FIRST_PROMPT_EVENT}"
+FIRST_PROMPT_SOCKET_ENV = "UCODE_CLAUDE_V2_SOCKET"
 
 
 def sync_smart_routing_hooks(doc: dict, state: dict, *, enabled: bool) -> None:
@@ -26,6 +29,23 @@ def sync_smart_routing_hooks(doc: dict, state: dict, *, enabled: bool) -> None:
 def remove_smart_routing_hooks(doc: dict) -> bool:
     """Remove only ucode-managed smart-routing hooks."""
     return hooks.remove_managed_hooks(doc, ROUTING_HOOK_COMMAND_MARKER)
+
+
+def sync_first_prompt_hook(doc: dict, executable: str) -> None:
+    """Add the first-prompt hook to a per-launch settings document."""
+    groups = {
+        "UserPromptSubmit": [
+            {
+                "hooks": [
+                    _routing_command_hook(
+                        [executable, ROUTING_HOOK_COMMAND_MARKER, ROUTE_FIRST_PROMPT_EVENT],
+                        status="Selecting a model with Smart Routing",
+                    )
+                ]
+            }
+        ]
+    }
+    hooks.sync_managed_hooks(doc, FIRST_PROMPT_HOOK_MARKER, groups)
 
 
 def _routing_hook_groups(state: dict) -> dict[str, list[dict]]:

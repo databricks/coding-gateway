@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tomllib
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import anyio
@@ -165,6 +166,79 @@ class TestPump:
 
         assert anyio.run(scenario) is True
 
+    def test_client_errors_are_forwarded(self):
+        async def scenario() -> Exception:
+            src_send, src_recv = anyio.create_memory_object_stream(1)
+            dst_send, dst_recv = anyio.create_memory_object_stream(1)
+            error = ValueError("malformed client message")
+            await src_send.send(error)
+            await src_send.aclose()
+
+            await mcp_proxy._pump(src_recv, dst_send)
+            return await dst_recv.receive()
+
+        error = anyio.run(scenario)
+        assert isinstance(error, ValueError)
+        assert str(error) == "malformed client message"
+
+    def test_upstream_errors_are_raised(self):
+        async def scenario() -> None:
+            src_send, src_recv = anyio.create_memory_object_stream(1)
+            dst_send, _ = anyio.create_memory_object_stream(1)
+            await src_send.send(httpx.ReadTimeout("upstream timed out"))
+            await src_send.aclose()
+
+            with pytest.raises(mcp_proxy.ProxyTransportError, match="upstream timed out"):
+                await mcp_proxy._pump_upstream(src_recv, dst_send)
+
+        anyio.run(scenario)
+
+    def test_upstream_eof_is_an_error(self):
+        async def scenario() -> None:
+            src_send, src_recv = anyio.create_memory_object_stream(1)
+            dst_send, _ = anyio.create_memory_object_stream(1)
+            await src_send.aclose()
+
+            with pytest.raises(
+                mcp_proxy.ProxyTransportError, match="upstream MCP transport closed"
+            ):
+                await mcp_proxy._pump_upstream(src_recv, dst_send)
+
+        anyio.run(scenario)
+
+
+def test_run_uses_mcp_http_defaults(monkeypatch):
+    httpx_module = mcp_proxy._httpx()
+    captured: dict = {}
+
+    class CapturingClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    class StopBridge(Exception):
+        pass
+
+    @asynccontextmanager
+    async def stop_bridge(*args, **kwargs):
+        raise StopBridge
+        yield
+
+    monkeypatch.setattr(httpx_module, "AsyncClient", CapturingClient)
+    monkeypatch.setattr(mcp_proxy, "_build_token_auth", lambda *args: object())
+    monkeypatch.setattr(mcp_proxy, "streamable_http_client", stop_bridge)
+
+    with pytest.raises(StopBridge):
+        anyio.run(mcp_proxy._run, URL, WS, None)
+
+    timeout = captured["timeout"]
+    assert (timeout.connect, timeout.read, timeout.write, timeout.pool) == (30.0, 300.0, 30.0, 30.0)
+
 
 class TestServe:
     def test_runs_the_bridge_with_parsed_args(self, monkeypatch):
@@ -288,8 +362,26 @@ class TestServe:
         assert excinfo.value.code == mcp_proxy.AUTH_FAILURE_EXIT_CODE
         assert "token expired" in capsys.readouterr().err
 
+    def test_transport_failure_exits_with_a_one_line_message(self, monkeypatch, capsys):
+        def raise_group(func, *args):
+            raise BaseExceptionGroup(
+                "transport",
+                [mcp_proxy.ProxyTransportError("upstream MCP transport closed unexpectedly")],
+            )
+
+        monkeypatch.setattr(mcp_proxy, "_preflight_token", lambda ws, profile: None)
+        monkeypatch.setattr(mcp_proxy.anyio, "run", raise_group)
+
+        with pytest.raises(SystemExit) as excinfo:
+            mcp_proxy.serve(URL, WS, "p")
+
+        assert excinfo.value.code == mcp_proxy.AUTH_FAILURE_EXIT_CODE
+        captured = capsys.readouterr()
+        assert captured.err == "ucode mcp-proxy: upstream MCP transport closed unexpectedly\n"
+        assert captured.out == ""
+
     def test_non_auth_failures_still_propagate(self, monkeypatch):
-        # Only auth failures are converted to a clean exit; genuine transport
+        # Only expected proxy failures are converted to a clean exit; programming
         # bugs must keep their traceback so they stay debuggable.
         def raise_other(func, *args):
             raise ValueError("some transport bug")

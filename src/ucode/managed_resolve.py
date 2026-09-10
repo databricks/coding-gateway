@@ -21,7 +21,6 @@ from __future__ import annotations
 
 from typing import cast
 
-from ucode.agents import GLOBAL_SETTINGS_AGENTS
 from ucode.databricks import ANTHROPIC_FAMILIES, classify_model_family
 from ucode.state import MANAGED_OVERLAY_KEY
 
@@ -177,21 +176,6 @@ def managed_provider_service(managed: dict, tool: str) -> str | None:
     return _str(_agent_model_config(managed, tool).get("model_provider_service"))
 
 
-def managed_use_as_global_settings(managed: dict, tool: str) -> bool:
-    """True when the admin marked ``tool`` machine-wide AND ``tool`` can support it.
-
-    ``use_as_global_settings`` means: also write the agent's OS-level managed settings file
-    (``/etc/claude-code/managed-settings.json``, ``/etc/codex/managed_config.toml``) so a bare
-    ``claude`` / ``codex`` picks up the gateway config. Only agents in
-    :data:`~ucode.agents.GLOBAL_SETTINGS_AGENTS` have such a file, so the flag is ignored for any
-    other agent — a hand-written ``--from-file`` config can't turn it on for an agent that has no
-    managed settings path.
-    """
-    if tool not in GLOBAL_SETTINGS_AGENTS:
-        return False
-    return bool(_agent_entry(managed, tool).get("use_as_global_settings"))
-
-
 def managed_default_model(managed: dict, tool: str) -> str | None:
     """Return the model the managed config wants ``tool`` to launch on, if it names one.
 
@@ -200,6 +184,13 @@ def managed_default_model(managed: dict, tool: str) -> str | None:
     pins it explicitly, so the admin's choice holds even for agents that would otherwise pick their
     own default."""
     return _str(_agent_model_config(managed, tool).get("default_model"))
+
+
+def managed_claude_family_models(managed: dict) -> dict[str, str] | None:
+    """Claude family models explicitly authored by Coding Agent Config."""
+
+    models = _manifest_models(managed, "claude")
+    return cast("dict[str, str]", models) if isinstance(models, dict) else None
 
 
 def managed_provider_family_models(managed: dict) -> dict[str, str] | None:
@@ -290,12 +281,6 @@ def resolve_state(managed: dict, state: dict, tool: str) -> dict:
             overlay["provider_services"] = state.get("provider_services")
             providers[tool] = provider
             resolved["provider_services"] = providers
-    if managed_use_as_global_settings(managed, tool):
-        # Transient: recorded in the overlay so `save_state` strips it before persisting. It exists
-        # only for this config-write, telling the agent's `write_tool_config` to also write the OS
-        # managed settings file. A non-managed launch never sets it, so default behavior is unchanged.
-        overlay["write_managed_config"] = state.get("write_managed_config")
-        resolved["write_managed_config"] = True
     if overlay:
         resolved[MANAGED_OVERLAY_KEY] = overlay
     return resolved

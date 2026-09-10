@@ -123,7 +123,7 @@ class TestSaveLoadRoundTrip:
 
         persisted = load_full_state()["workspaces"][FAKE_WS]
         assert persisted["codex_models"][0] == "system.ai.gpt-5"
-        assert persisted["agents"]["codex"]["model"] == "system.ai.gpt-5-6-luna"
+        assert "model" not in persisted["agents"]["codex"]
         assert persisted["agents"]["pi"]["model"] == "system.ai.gpt-5"
 
     def test_save_respects_dry_run(self):
@@ -221,7 +221,7 @@ class TestHydrateState:
         # Cross-platform helper, not the old POSIX `if [ -n ... ]` pipeline (#116).
         assert "auth-token" in result["agents"]["claude"]["auth_command"]
         assert "if [ -n" not in result["agents"]["claude"]["auth_command"]
-        assert result["agents"]["codex"]["model"] == "gpt-5"
+        assert "model" not in result["agents"]["codex"]
         assert result["agents"]["codex"]["base_url"] == FAKE_URLS["codex"]
         # Codex runs the helper as argv (command + args), never via `sh -c`.
         codex_auth = result["agents"]["codex"]["auth"]
@@ -266,6 +266,22 @@ class TestBuildAgentState:
         for agent in ("claude", "codex", "pi"):
             assert "--use-pat" in result[agent]["auth_command"]
             assert "--profile DEFAULT" in result[agent]["auth_command"]
+
+    def test_custom_oauth_applies_to_claude_and_codex(self):
+        result = build_agent_state(
+            {
+                "workspace": "https://example.databricks.com",
+                "base_urls": FAKE_URLS,
+                "custom_oauth": {
+                    "client_id": "custom-client",
+                    "redirect_url": "http://localhost:8020/callback",
+                    "scopes": ["offline_access", "model-serving"],
+                },
+            }
+        )
+
+        assert "--client-id custom-client" in result["claude"]["auth_command"]
+        assert result["codex"]["auth"]["args"][-1] == "offline_access,model-serving"
 
 
 # ---------------------------------------------------------------------------

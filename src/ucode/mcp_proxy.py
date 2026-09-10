@@ -34,18 +34,18 @@ especially confusing -- the user needs to be told to re-run
 from __future__ import annotations
 
 import sys
-from types import ModuleType
+from collections.abc import AsyncIterator
+from types import ModuleType, TracebackType
+from typing import Protocol, Self
 
 import anyio
-from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from mcp.client.streamable_http import streamable_http_client
 from mcp.server.stdio import stdio_server
 
 from ucode.databricks import ensure_pat_bearer, get_databricks_token
 
-# Exit code used when the proxy cannot authenticate. MCP clients surface a
-# non-zero exit far more usefully than a startup timeout, so bail out with this
-# instead of letting the process hang until the client's timeout fires.
+# Exit code used when the proxy cannot continue. MCP clients surface a non-zero
+# exit far more usefully than a timeout, so bail out instead of hanging.
 AUTH_FAILURE_EXIT_CODE = 2
 
 
@@ -76,8 +76,34 @@ class ProxyAuthError(RuntimeError):
     stderr and exits rather than retrying."""
 
 
+class ProxyTransportError(RuntimeError):
+    """The upstream MCP transport failed or closed unexpectedly."""
+
+
+class _ReceiveStream[T](Protocol):
+    def __aiter__(self) -> AsyncIterator[T]: ...
+    async def __aenter__(self) -> Self: ...
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> bool | None: ...
+
+
+class _SendStream[T](Protocol):
+    async def send(self, item: T, /) -> None: ...
+    async def __aenter__(self) -> Self: ...
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> bool | None: ...
+
+
 def _fail_fast(message: str) -> None:
-    """Report a terminal auth failure on stderr and exit non-zero.
+    """Report a terminal proxy failure on stderr and exit non-zero.
 
     stdout is the MCP wire, so diagnostics must go to stderr — MCP clients
     surface a child's stderr when it fails to start."""
@@ -113,11 +139,11 @@ def _build_token_auth(workspace: str, profile: str | None):
     return _DatabricksTokenAuth()
 
 
-async def _pump(
-    source: MemoryObjectReceiveStream,
-    dest: MemoryObjectSendStream,
+async def _pump[T](
+    source: _ReceiveStream[T],
+    dest: _SendStream[T],
 ) -> None:
-    """Forward every message (or transport exception) from ``source`` to ``dest``.
+    """Forward every message from ``source`` to ``dest``.
 
     The proxy is transport-level: it never inspects or rewrites MCP method
     payloads, so new methods and capabilities pass through untouched."""
@@ -126,13 +152,35 @@ async def _pump(
             await dest.send(message)
 
 
+async def _pump_upstream[T](
+    source: _ReceiveStream[T | Exception],
+    dest: _SendStream[T],
+) -> None:
+    """Forward upstream messages, failing if the transport closes first."""
+    async with source, dest:
+        async for message in source:
+            if isinstance(message, Exception):
+                detail = " ".join(str(message).split()) or type(message).__name__
+                raise ProxyTransportError(f"upstream MCP transport failed: {detail}") from message
+            await dest.send(message)
+    raise ProxyTransportError("upstream MCP transport closed unexpectedly")
+
+
 async def _run(url: str, workspace: str, profile: str | None) -> None:
     httpx = _httpx()
     auth = _build_token_auth(workspace, profile)
     # 2.x-native shape: hand the transport a pre-built AsyncClient carrying our
     # per-request auth. Works on mcp 1.28+ and 2.x; `streamable_http_client`
     # yields a (read, write) pair in both.
-    async with httpx.AsyncClient(auth=auth) as http_client:
+    async with httpx.AsyncClient(
+        auth=auth,
+        timeout=httpx.Timeout(
+            connect=30.0,
+            read=300.0,
+            write=30.0,
+            pool=30.0,
+        ),
+    ) as http_client:
         async with streamable_http_client(url, http_client=http_client) as streams:
             # mcp 1.x yields (read, write, get_session_id); mcp 2.x drops the
             # trailing callback and yields (read, write). Take the first two
@@ -141,8 +189,9 @@ async def _run(url: str, workspace: str, profile: str | None) -> None:
             async with stdio_server() as (stdio_read, stdio_write):
                 # Bidirectional bridge: client stdin -> Databricks, Databricks -> client stdout.
                 async with anyio.create_task_group() as tg:
-                    tg.start_soon(_pump, stdio_read, http_write)
-                    tg.start_soon(_pump, http_read, stdio_write)
+                    tg.start_soon(_pump_upstream, http_read, stdio_write)
+                    await _pump(stdio_read, http_write)
+                    tg.cancel_scope.cancel()
 
 
 def _preflight_token(workspace: str, profile: str | None) -> None:
@@ -156,15 +205,15 @@ def _preflight_token(workspace: str, profile: str | None) -> None:
     get_databricks_token(workspace, profile)
 
 
-def _unwrap_auth_error(exc: BaseException) -> ProxyAuthError | None:
-    """Find a ProxyAuthError anywhere in an exception (or ExceptionGroup) tree.
+def _unwrap_proxy_error(exc: BaseException) -> ProxyAuthError | ProxyTransportError | None:
+    """Find a known proxy error in an exception (or ExceptionGroup) tree.
 
-    anyio task groups wrap failures in ExceptionGroups, so a token failure
-    raised inside the transport arrives nested rather than as itself."""
-    if isinstance(exc, ProxyAuthError):
+    anyio task groups wrap failures in ExceptionGroups, so failures raised
+    inside the transport arrive nested rather than as themselves."""
+    if isinstance(exc, (ProxyAuthError, ProxyTransportError)):
         return exc
     for nested in getattr(exc, "exceptions", ()) or ():
-        found = _unwrap_auth_error(nested)
+        found = _unwrap_proxy_error(nested)
         if found is not None:
             return found
     return None
@@ -198,13 +247,13 @@ def serve(url: str, workspace: str, profile: str | None = None, *, use_pat: bool
 
     try:
         anyio.run(_run, url, workspace, profile)
-    except BaseException as exc:  # noqa: BLE001 - re-raised unless it's an auth failure
-        # The token can still expire mid-session; report that the same way
-        # rather than letting the ExceptionGroup surface as a hang or traceback.
-        auth_error = _unwrap_auth_error(exc)
-        if auth_error is None:
+    except BaseException as exc:  # noqa: BLE001 - re-raised unless it's a known proxy failure
+        # Errors raised inside the transport arrive wrapped by its task group.
+        # Report expected auth/transport failures without hiding programming bugs.
+        proxy_error = _unwrap_proxy_error(exc)
+        if proxy_error is None:
             raise
-        _fail_fast(str(auth_error))
+        _fail_fast(str(proxy_error))
 
 
-__all__ = ["AUTH_FAILURE_EXIT_CODE", "ProxyAuthError", "serve"]
+__all__ = ["AUTH_FAILURE_EXIT_CODE", "ProxyAuthError", "ProxyTransportError", "serve"]

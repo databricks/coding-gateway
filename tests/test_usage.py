@@ -12,6 +12,7 @@ import ucode.usage as usage_mod
 from ucode.databricks import SqlWarehouse
 from ucode.ui import label, value
 from ucode.usage import (
+    TOOL_MODEL_TABLE_HEADERS,
     USAGE_BREAKDOWN_DAYS,
     USAGE_SUMMARY_DAYS,
     ModelPrice,
@@ -33,6 +34,8 @@ from ucode.usage import (
     render_budget_lines,
     render_usage_summary,
     run_query_on_first_working_warehouse,
+    select_and_run_usage_query,
+    select_sql_warehouse,
     simplify_model_name,
     summarize_models,
     usage,
@@ -464,6 +467,9 @@ class TestBuildToolModelRows:
         _, totals = build_tool_model_rows(records, "claude", self._lookup())
         assert totals.cost is None
 
+    def test_cost_header_is_explicitly_estimated(self):
+        assert TOOL_MODEL_TABLE_HEADERS[-1] == "Est. Cost (USD)"
+
 
 class TestRenderBudgetLines:
     def test_no_lines_when_unavailable(self):
@@ -513,6 +519,11 @@ class TestRenderUsageSummary:
         records = [self._make_record(0, "claude", 5000)]
         result = render_usage_summary(records, "user", {"claude": "Claude Code"})
         assert "5.0K" in result
+        assert "Databricks AI Gateway Token Usage" in result
+        assert "┃ Today" in result
+        assert "Last 7 days" in result
+        assert "Last 30 days" in result
+        assert "│ [cyan]5.0K tokens[/cyan]" in result
 
     def test_weekly_total_includes_past_week(self):
         records = [
@@ -525,9 +536,12 @@ class TestRenderUsageSummary:
         assert "3.0K" in result or "3" in result
 
     def test_active_tools_listed(self):
-        records = [self._make_record(0, "claude", 1000)]
-        result = render_usage_summary(records, "user", {"claude": "Claude Code"})
-        assert "Claude Code" in result
+        records = [
+            self._make_record(0, "claude", 1000),
+            self._make_record(0, "codex", 1000),
+        ]
+        result = render_usage_summary(records, "user", {"claude": "Claude Code", "codex": "Codex"})
+        assert "🤖  [bold]Top Harnesses:[/bold] [cyan]Claude Code · Codex[/cyan]" in result
 
     def test_top_models_listed(self):
         records = [
@@ -540,6 +554,27 @@ class TestRenderUsageSummary:
         ]
         result = render_usage_summary(records, "user", {"claude": "Claude Code"})
         assert "claude-sonnet-4" in result
+
+    def test_estimated_cost_label(self):
+        records = [
+            {
+                "tool": "claude",
+                "usage_day": date.today(),
+                "total_tokens_used": 1_000_000,
+                "model_tokens": (
+                    '[{"model":"databricks-claude-sonnet-4","tokens":1000000,'
+                    '"input":1000000,"output":0}]'
+                ),
+            }
+        ]
+        result = render_usage_summary(
+            records,
+            "user",
+            {"claude": "Claude Code"},
+            price_lookup={"claudesonnet4": ModelPrice(Decimal("4.12"), None, None)},
+        )
+        assert "Estimated Cost for Last 7 Days:" in result
+        assert "$4.12" in result
 
     def test_includes_budget_spend_when_available(self):
         records = [self._make_record(0, "claude", 1000)]
@@ -583,8 +618,8 @@ class TestRenderUsageSummary:
         )
         # Top-models line is full names only, ranked by per-model token totals
         # (claude-opus-4 236.1K > gpt-5 13.3K > claude-haiku-4.5 920).
-        assert "Top models this week:" in result
-        assert "claude-opus-4, gpt-5, claude-haiku-4.5" in result
+        assert "⭐  [bold]Top Models:[/bold]" in result
+        assert "claude-opus-4 · gpt-5 · claude-haiku-4.5" in result
         # No token counts in this line — those live in the per-model table.
         assert "236.1K" not in result
 
@@ -661,6 +696,10 @@ class TestUsageCommand:
         monkeypatch.setattr(
             usage_mod, "resolve_current_budget_spend", lambda *args, **kwargs: (None, "disabled")
         )
+        monkeypatch.setattr(usage_mod, "prompt_yes_no_default", lambda *args, **kwargs: True)
+        monkeypatch.setattr(
+            usage_mod, "prompt_for_selection", lambda prompt, options: options[0][0]
+        )
         monkeypatch.setattr(
             usage_mod, "fetch_external_model_prices", lambda *args, **kwargs: ([], "disabled")
         )
@@ -675,16 +714,123 @@ class TestUsageCommand:
         assert "Claude Code · Last 7 Days" in headings
         assert all("Gemini" not in heading for heading in headings)
         assert notes == [
+            "Budget spend and threshold are unavailable. "
+            "Please configure a coding agent budget policy first.",
             "Using SQL warehouse `wh` (RUNNING).",
             f"No usage for Claude Code in the last {USAGE_BREAKDOWN_DAYS} days.",
         ]
-        assert len(rendered_tables) == 1
+        assert len(rendered_tables) == 2
+        assert rendered_tables[0] == [["100 tokens", "100 tokens", "300 tokens"]]
         # One per-model row for codex: full model name "gpt-5", 1 request, 80 input / 20 output.
-        assert rendered_tables[0][0][0] == "gpt-5"
-        assert rendered_tables[0][0][1] == "1"
-        assert rendered_tables[0][0][2] == "80"
+        assert rendered_tables[1][0][0] == "gpt-5"
+        assert rendered_tables[1][0][1] == "1"
+        assert rendered_tables[1][0][2] == "80"
         assert "gemini" not in "\n".join(printed).lower()
         assert "900" not in "\n".join(printed)
+
+    def test_queries_only_the_selected_warehouse(self, monkeypatch):
+        queried_paths: list[str] = []
+        candidates = [
+            SqlWarehouse("/sql/1.0/warehouses/first", "First", "RUNNING"),
+            SqlWarehouse("/sql/1.0/warehouses/second", "Second", "STOPPED"),
+        ]
+
+        monkeypatch.setattr(
+            usage_mod,
+            "load_state",
+            lambda: {"workspace": "https://workspace", "available_tools": []},
+        )
+        monkeypatch.setattr(usage_mod, "ensure_databricks_auth", lambda *args, **kwargs: None)
+        monkeypatch.setattr(usage_mod, "get_databricks_token", lambda *args, **kwargs: "token")
+        monkeypatch.setattr(
+            usage_mod,
+            "resolve_current_budget_spend",
+            lambda *args, **kwargs: ((Decimal("1"), Decimal("10")), None),
+        )
+        monkeypatch.setattr(usage_mod, "prompt_yes_no_default", lambda *args, **kwargs: True)
+        monkeypatch.setattr(
+            usage_mod, "discover_sql_warehouses", lambda *args, **kwargs: candidates
+        )
+
+        def choose_second(prompt, options):
+            assert options == [
+                (candidates[0].http_path, "First (RUNNING)"),
+                (candidates[1].http_path, "Second (STOPPED)"),
+            ]
+            return candidates[1].http_path
+
+        monkeypatch.setattr(usage_mod, "prompt_for_selection", choose_second)
+
+        def fake_query(workspace, http_path, token, query, on_connected=None):
+            queried_paths.append(http_path)
+            return ["requester_name"], [("user@example.com",)]
+
+        monkeypatch.setattr(usage_mod, "run_usage_query", fake_query)
+        monkeypatch.setattr(
+            usage_mod, "fetch_external_model_prices", lambda *args, **kwargs: ([], None)
+        )
+        monkeypatch.setattr(usage_mod, "print_note", lambda *args: None)
+        monkeypatch.setattr(usage_mod, "console", type("C", (), {"print": lambda *args: None})())
+
+        assert usage() == 0
+        assert queried_paths == [candidates[1].http_path]
+
+    def test_shows_budget_before_prompt_and_skips_sql_when_declined(self, monkeypatch):
+        events: list[str] = []
+
+        class DummyConsole:
+            def print(self, output):
+                events.append(str(output))
+
+        monkeypatch.setattr(
+            usage_mod,
+            "load_state",
+            lambda: {"workspace": "https://workspace", "available_tools": ["codex"]},
+        )
+        monkeypatch.setattr(usage_mod, "ensure_databricks_auth", lambda *args, **kwargs: None)
+        monkeypatch.setattr(usage_mod, "get_databricks_token", lambda *args, **kwargs: "token")
+        monkeypatch.setattr(
+            usage_mod,
+            "resolve_current_budget_spend",
+            lambda *args, **kwargs: ((Decimal("12.34"), Decimal("100")), None),
+        )
+        monkeypatch.setattr(usage_mod, "console", DummyConsole())
+
+        def decline(prompt, *, default):
+            assert "$12.34 of $100.00" in "\n".join(events)
+            assert "SQL warehouse" in prompt
+            assert default is False
+            return False
+
+        monkeypatch.setattr(usage_mod, "prompt_yes_no_default", decline)
+        monkeypatch.setattr(
+            usage_mod,
+            "discover_sql_warehouses",
+            lambda *args, **kwargs: pytest.fail("SQL discovery should not run"),
+        )
+        monkeypatch.setattr(
+            usage_mod,
+            "fetch_external_model_prices",
+            lambda *args, **kwargs: pytest.fail("price lookup should not run"),
+        )
+
+        assert usage() == 0
+
+
+class TestSelectSqlWarehouse:
+    def test_returns_selected_candidate(self, monkeypatch):
+        candidates = [
+            SqlWarehouse("/sql/1.0/warehouses/a", "Alpha", "RUNNING"),
+            SqlWarehouse("/sql/1.0/warehouses/b", "Beta", "STOPPED"),
+        ]
+        monkeypatch.setattr(
+            usage_mod, "prompt_for_selection", lambda prompt, options: candidates[1].http_path
+        )
+        assert select_sql_warehouse(candidates) == candidates[1]
+
+    def test_returns_none_when_cancelled(self, monkeypatch):
+        monkeypatch.setattr(usage_mod, "prompt_for_selection", lambda prompt, options: None)
+        assert select_sql_warehouse([SqlWarehouse("/path", "Warehouse", "RUNNING")]) is None
 
 
 class TestRunQueryOnFirstWorkingWarehouse:
@@ -745,6 +891,54 @@ class TestRunQueryOnFirstWorkingWarehouse:
             run_query_on_first_working_warehouse("https://ws", "token", [], "SELECT 1")
 
 
+class TestSelectAndRunUsageQuery:
+    _COLUMNS = ["requester_name"]
+    _ROWS = [("user@example.com",)]
+
+    def _warehouses(self) -> list[SqlWarehouse]:
+        return [
+            SqlWarehouse("/sql/1.0/warehouses/dead", "Dead", "RUNNING"),
+            SqlWarehouse("/sql/1.0/warehouses/alive", "Alive", "RUNNING"),
+        ]
+
+    def test_prompts_again_without_failed_warehouse(self, monkeypatch):
+        candidates = self._warehouses()
+        picker_options: list[list[str]] = []
+
+        def choose(remaining):
+            picker_options.append([warehouse.label for warehouse in remaining])
+            return remaining[0]
+
+        def query(workspace, http_path, token, query, on_connected=None):
+            if http_path.endswith("dead"):
+                raise RuntimeError("warehouse unavailable")
+            return self._COLUMNS, self._ROWS
+
+        monkeypatch.setattr(usage_mod, "select_sql_warehouse", choose)
+        monkeypatch.setattr(usage_mod, "run_usage_query", query)
+        monkeypatch.setattr(usage_mod, "print_note", lambda *a: None)
+        monkeypatch.setattr(usage_mod, "print_warning", lambda *a: None)
+
+        result = select_and_run_usage_query("https://ws", "token", candidates, "SELECT 1")
+
+        assert result == (candidates[1].http_path, self._COLUMNS, self._ROWS)
+        assert picker_options == [["Dead", "Alive"], ["Alive"]]
+
+    def test_can_cancel_after_a_warehouse_fails(self, monkeypatch):
+        candidates = self._warehouses()
+        choices = iter([candidates[0], None])
+        monkeypatch.setattr(usage_mod, "select_sql_warehouse", lambda remaining: next(choices))
+        monkeypatch.setattr(
+            usage_mod,
+            "run_usage_query",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("warehouse unavailable")),
+        )
+        monkeypatch.setattr(usage_mod, "print_note", lambda *a: None)
+        monkeypatch.setattr(usage_mod, "print_warning", lambda *a: None)
+
+        assert select_and_run_usage_query("https://ws", "token", candidates, "SELECT 1") is None
+
+
 class TestUsageWarehouseIdPassthrough:
     def test_forwards_warehouse_id_to_discovery(self, monkeypatch):
         captured = {}
@@ -763,6 +957,7 @@ class TestUsageWarehouseIdPassthrough:
         monkeypatch.setattr(
             usage_mod, "resolve_current_budget_spend", lambda *a, **k: (None, "disabled")
         )
+        monkeypatch.setattr(usage_mod, "prompt_yes_no_default", lambda *a, **k: True)
         monkeypatch.setattr(
             usage_mod, "fetch_external_model_prices", lambda *a, **k: ([], "disabled")
         )

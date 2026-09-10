@@ -40,7 +40,6 @@ import subprocess
 import threading
 from pathlib import Path
 
-from ucode.agent_updates import available_npm_package_update
 from ucode.config_io import (
     APP_DIR,
     ToolSpec,
@@ -57,6 +56,8 @@ from ucode.databricks import (
 )
 from ucode.state import mark_tool_managed, save_state
 from ucode.telemetry import agent_version
+
+from .args import LaunchOptions
 
 COPILOT_CONFIG_DIR = Path.home() / ".copilot"
 COPILOT_ENV_PATH = COPILOT_CONFIG_DIR / "ucode.env"
@@ -109,10 +110,6 @@ _BEDROCK_VERSION_SUFFIX_RE = re.compile(r"-v\d+(:\d+)?$")
 MINIMUM_COPILOT_ANTHROPIC_VERSION = (1, 0, 81, 6)
 _UNRELEASED = 999_999
 _COPILOT_VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)(?:-(\d+))?")
-
-
-def is_update_available() -> tuple[str, str] | None:
-    return available_npm_package_update(SPEC["package"])
 
 
 def default_model(state: dict) -> str | None:
@@ -275,7 +272,7 @@ def _refresh_forever(state: dict, stop_event: threading.Event) -> None:
             continue
 
 
-def launch(state: dict, tool_args: list[str]) -> None:
+def launch(state: dict, tool_args: list[str], *, options: LaunchOptions) -> None:
     model, token = _refresh_token_once(state)
     env = build_runtime_env(state["workspace"], model, token)
 

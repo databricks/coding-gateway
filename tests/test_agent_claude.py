@@ -1543,3 +1543,45 @@ class TestClaudeSmartRouting:
         assert state.get(claude.SMART_ROUTING_STATE_KEY) is None
         assert list(doc["hooks"]) == ["PreToolUse"]
         assert doc["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == "user-policy"
+
+
+class TestEnsureSubscriptionLogin:
+    """Relayed launch's subscription-login gate."""
+
+    @staticmethod
+    def _forbid_subprocess(monkeypatch):
+        """Fail loudly if the CLI is shelled out to at all (status probe or login)."""
+
+        def _boom(*args, **kwargs):
+            raise AssertionError(f"unexpected subprocess call: {args!r}")
+
+        monkeypatch.setattr(claude.subprocess, "run", _boom)
+
+    def test_oauth_token_env_skips_login(self, monkeypatch):
+        # A pre-provisioned CLAUDE_CODE_OAUTH_TOKEN (e.g. `claude setup-token`
+        # output in CI) is the credential Claude Code uses directly, so no
+        # interactive browser login applies — and no `auth status` probe is even
+        # needed. This keeps headless/relayed runs from hanging on the browser.
+        monkeypatch.setenv(claude.CLAUDE_CODE_OAUTH_TOKEN_ENV_VAR, "dummy-oauth-token")
+        self._forbid_subprocess(monkeypatch)
+        claude._ensure_subscription_login()  # returns without touching the CLI
+
+    def test_existing_login_skips_browser(self, monkeypatch):
+        monkeypatch.delenv(claude.CLAUDE_CODE_OAUTH_TOKEN_ENV_VAR, raising=False)
+        monkeypatch.setattr(claude, "_has_subscription_login", lambda: True)
+
+        def _boom(cmd, **kwargs):
+            raise AssertionError(f"no auth login expected, got {cmd!r}")
+
+        monkeypatch.setattr(claude.subprocess, "run", _boom)
+        claude._ensure_subscription_login()
+
+    def test_missing_login_runs_browser_flow(self, monkeypatch):
+        monkeypatch.delenv(claude.CLAUDE_CODE_OAUTH_TOKEN_ENV_VAR, raising=False)
+        monkeypatch.setattr(claude, "_has_subscription_login", lambda: False)
+        calls: list[list[str]] = []
+        monkeypatch.setattr(claude.subprocess, "run", lambda cmd, **kwargs: calls.append(cmd))
+        monkeypatch.setattr(claude, "print_note", lambda *a, **kw: None)
+        monkeypatch.setattr(claude, "print_success", lambda *a, **kw: None)
+        claude._ensure_subscription_login()
+        assert calls == [[claude.SPEC["binary"], "auth", "login"]]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -154,6 +155,7 @@ class TestRenderOverlayUserAgent:
     def test_managed_keys_include_http_headers(self):
         # Revert must clean up the new key.
         assert ["model_providers", "ucode-databricks", "http_headers"] in codex.MANAGED_KEYS
+        assert ["model_catalog_json"] not in codex.MANAGED_KEYS
 
 
 class TestCodexWriteConfig:
@@ -203,7 +205,7 @@ class TestCodexWriteConfig:
         doc = read_toml_safe(config_path)
         assert "model" not in doc
 
-    def test_provider_writes_header_and_drops_stale_model(self, tmp_path, monkeypatch):
+    def test_provider_drops_stale_model_without_persisting_header(self, tmp_path, monkeypatch):
         config_path = tmp_path / ".codex" / "ucode.config.toml"
         backup_path = tmp_path / "codex-ucode-config.backup.toml"
         monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", config_path)
@@ -215,7 +217,7 @@ class TestCodexWriteConfig:
         codex.write_tool_config({"workspace": WS, "codex_models": ["gpt-5"]})
         assert "model" not in read_toml_safe(config_path)
 
-        # A provider run must clear it and add the routing header.
+        # The routing header is added only to the launch config.
         codex.write_tool_config(
             {"workspace": WS, "codex_models": ["gpt-5"]},
             provider="main.aarushi.aarushi-openai",
@@ -224,7 +226,21 @@ class TestCodexWriteConfig:
         doc = read_toml_safe(config_path)
         assert "model" not in doc
         headers = doc["model_providers"]["ucode-databricks"]["http_headers"]
-        assert headers["Databricks-Model-Provider-Service"] == "main.aarushi.aarushi-openai"
+        assert "Databricks-Model-Provider-Service" not in headers
+
+    def test_non_provider_write_removes_stale_provider_header(self, tmp_path, monkeypatch):
+        config_path = tmp_path / ".codex" / "ucode.config.toml"
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", config_path)
+        monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", tmp_path / "backup.toml")
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.134.0")
+        monkeypatch.setattr(codex, "save_state", lambda state: None)
+
+        state = {"workspace": WS, "codex_models": ["gpt-5"]}
+        codex.write_tool_config(state, provider="main.default.openai")
+        codex.write_tool_config(state)
+
+        headers = read_toml_safe(config_path)["model_providers"]["ucode-databricks"]["http_headers"]
+        assert "Databricks-Model-Provider-Service" not in headers
 
     def test_clears_profile_model_preferences_before_launch(self, tmp_path, monkeypatch):
         config_path = tmp_path / ".codex" / "ucode.config.toml"
@@ -615,7 +631,7 @@ class TestCodexLaunch:
         launches = self._patch(tmp_path, monkeypatch)
         catalog_path = tmp_path / "models.json"
         catalog = {"models": [{"slug": "gpt-mps"}]}
-        monkeypatch.setattr(codex, "CODEX_MPS_MODEL_CATALOG_PATH", catalog_path)
+        monkeypatch.setattr(codex, "_model_catalog_path", lambda workspace, provider: catalog_path)
         monkeypatch.setattr(
             codex,
             "fetch_codex_mps_model_catalog",
@@ -630,6 +646,106 @@ class TestCodexLaunch:
 
         assert catalog_path.exists()
         assert f'model_catalog_json="{catalog_path}"' in launches[0]
+        provider_arg = next(
+            arg for arg in launches[0] if arg.startswith("model_providers.ucode-databricks=")
+        )
+        assert 'Databricks-Model-Provider-Service = "main.default.openai"' in provider_arg
+
+    def test_non_provider_launch_removes_stale_provider_header(self, tmp_path, monkeypatch):
+        launches = self._patch(tmp_path, monkeypatch)
+        profile_path = tmp_path / "ucode.config.toml"
+        profile_path.write_text(
+            profile_path.read_text(encoding="utf-8")
+            + "\n[model_providers.ucode-databricks.http_headers]\n"
+            + 'Databricks-Model-Provider-Service = "main.default.old"\n',
+            encoding="utf-8",
+        )
+
+        codex.launch({"workspace": WS}, [], options=LaunchOptions())
+
+        provider_arg = next(
+            arg for arg in launches[0] if arg.startswith("model_providers.ucode-databricks=")
+        )
+        assert "Databricks-Model-Provider-Service" not in provider_arg
+
+    def test_provider_discovery_uses_custom_oauth_token(self, tmp_path, monkeypatch):
+        self._patch(tmp_path, monkeypatch)
+        catalog_path = tmp_path / "models.json"
+        seen = {}
+        monkeypatch.setattr(codex, "_model_catalog_path", lambda workspace, provider: catalog_path)
+        monkeypatch.setattr(
+            codex,
+            "get_databricks_token",
+            lambda *args, **kwargs: pytest.fail("standard token used"),
+        )
+        monkeypatch.setattr(
+            codex,
+            "get_custom_client_token",
+            lambda workspace, client_id, redirect_url, *, scopes: "custom-token",
+        )
+
+        def fetch(workspace, token, provider):
+            seen.update(workspace=workspace, token=token, provider=provider)
+            return {"models": [{"slug": "gpt-mps"}]}
+
+        monkeypatch.setattr(codex, "fetch_codex_mps_model_catalog", fetch)
+        state = {
+            "workspace": WS,
+            "_codex_launch_provider": "main.default.openai",
+            "custom_oauth": {
+                "client_id": "client",
+                "redirect_url": "http://localhost:8020",
+                "scopes": ["all-apis", "offline_access"],
+            },
+        }
+
+        codex.launch(state, [], options=LaunchOptions())
+
+        assert seen == {
+            "workspace": WS,
+            "token": "custom-token",
+            "provider": "main.default.openai",
+        }
+        assert os.environ["OAUTH_TOKEN"] == "custom-token"
+
+    def test_catalog_paths_are_provider_scoped(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(codex, "CODEX_MPS_MODEL_CATALOG_PATH", tmp_path / "models.json")
+
+        first = codex._model_catalog_path(WS, "main.default.first")
+        second = codex._model_catalog_path(WS, "main.default.second")
+
+        assert first != second
+        assert first == codex._model_catalog_path(WS, "main.default.first")
+
+    def test_catalog_write_is_complete_and_atomic(self, tmp_path):
+        path = tmp_path / "models.json"
+        catalog = {"models": [{"slug": "gpt-mps"}]}
+
+        codex._write_model_catalog(path, catalog)
+
+        assert json.loads(path.read_text(encoding="utf-8")) == catalog
+        assert list(tmp_path.glob(".models.json.*.tmp")) == []
+
+    def test_catalog_write_reports_path_on_failure(self, tmp_path, monkeypatch):
+        path = tmp_path / "models.json"
+        monkeypatch.setattr(codex.os, "replace", lambda *args: (_ for _ in ()).throw(OSError()))
+
+        with pytest.raises(RuntimeError, match=str(path)):
+            codex._write_model_catalog(path, {"models": [{"slug": "gpt-mps"}]})
+
+        assert list(tmp_path.glob(".models.json.*.tmp")) == []
+
+    def test_catalog_cleanup_does_not_mask_write_failure(self, tmp_path, monkeypatch):
+        path = tmp_path / "models.json"
+        monkeypatch.setattr(codex.os, "replace", lambda *args: (_ for _ in ()).throw(OSError()))
+        monkeypatch.setattr(
+            codex.Path,
+            "unlink",
+            lambda *args, **kwargs: (_ for _ in ()).throw(OSError()),
+        )
+
+        with pytest.raises(RuntimeError, match=str(path)):
+            codex._write_model_catalog(path, {"models": [{"slug": "gpt-mps"}]})
 
     @pytest.mark.parametrize(
         "tool_args",
@@ -713,6 +829,30 @@ class TestCodexManagedConfig:
         # ucode removes its stale model pin, but other keys already in the managed file survive.
         assert doc["approval_policy"] == "on-request"
         assert "model" not in doc
+
+    def test_provider_settings_stay_launch_scoped(self, tmp_path, monkeypatch):
+        config_path, managed_path = self._patch(tmp_path, monkeypatch)
+        managed_path.parent.mkdir(parents=True, exist_ok=True)
+        managed_path.write_text(
+            'model_catalog_json = "/tmp/stale.json"\n\n'
+            "[model_providers.ucode-databricks.http_headers]\n"
+            'Databricks-Model-Provider-Service = "main.default.stale"\n',
+            encoding="utf-8",
+        )
+
+        codex.write_tool_config(
+            {"workspace": WS, "codex_models": ["gpt-5"]},
+            provider="main.default.openai",
+        )
+
+        local_headers = read_toml_safe(config_path)["model_providers"]["ucode-databricks"][
+            "http_headers"
+        ]
+        managed = read_toml_safe(managed_path)
+        managed_headers = managed["model_providers"]["ucode-databricks"]["http_headers"]
+        assert codex.MPS_HEADER not in local_headers
+        assert codex.MPS_HEADER not in managed_headers
+        assert managed["model_catalog_json"] == "/tmp/stale.json"
 
     def test_noninteractive_uses_local_config_when_managed_config_is_compatible(
         self, tmp_path, monkeypatch

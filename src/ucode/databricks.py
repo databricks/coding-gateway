@@ -2992,12 +2992,23 @@ def build_pi_base_urls(workspace: str) -> dict[str, str]:
     }
 
 
-def build_copilot_base_url(workspace: str) -> str:
-    # Copilot CLI's `openai` provider appends `/chat/completions` to the
-    # configured base URL. The Databricks MLflow chat-completions gateway is
-    # OpenAI-compatible and serves Claude, codex (gpt-5), and gemini models
-    # behind one URL.
-    return f"{workspace}/ai-gateway/mlflow/v1"
+def build_copilot_base_urls(workspace: str) -> dict[str, str]:
+    # Copilot CLI's `anthropic` provider type speaks the native Anthropic
+    # Messages API directly, against the same gateway path claude.py uses.
+    # That's what lets Copilot's own cache_control-insertion logic run and
+    # cache the (typically huge, shared) system/tool prefix — the `openai`
+    # provider's wire format has no field to carry a cache breakpoint, so a
+    # Claude model proxied that way never gets a cache hit.
+    #
+    # Codex (gpt-5) has no native-dialect provider type on Copilot's side, so
+    # it stays on `openai` against the OpenAI-compatible MLflow
+    # chat-completions gateway, which serves Claude, codex, and gemini behind
+    # one URL. Copilot CLI's `openai` provider appends `/chat/completions` to
+    # this base URL.
+    return {
+        "anthropic": build_tool_base_url("claude", workspace),
+        "openai": f"{workspace}/ai-gateway/mlflow/v1",
+    }
 
 
 def build_shared_base_urls(workspace: str) -> dict[str, str | dict[str, str]]:
@@ -3006,7 +3017,7 @@ def build_shared_base_urls(workspace: str) -> dict[str, str | dict[str, str]]:
         "claude": build_tool_base_url("claude", workspace),
         "gemini": build_tool_base_url("gemini", workspace),
         "opencode": build_opencode_base_urls(workspace),
-        "copilot": build_copilot_base_url(workspace),
+        "copilot": build_copilot_base_urls(workspace),
         "pi": build_pi_base_urls(workspace),
     }
     return urls

@@ -6,15 +6,35 @@ inspect what's configured (`cat ~/.copilot/.env`) and to give `revert` something
 to clean up; the values are also injected directly into the child process's
 environment at launch.
 
-We point Copilot CLI's `openai` provider at the Databricks MLflow chat-completions
-gateway, which serves Claude and codex (gpt-5) models. Gemini is intentionally
-excluded — Databricks' Gemini translation layer rejects the `stream_options`
-field that Copilot CLI sends, so Gemini models 400 on every request.
+Copilot CLI supports two BYOK provider dialects. Claude models get its native
+`anthropic` provider type, pointed at the same Messages-API gateway path
+claude.py uses — Copilot's own runtime inserts `cache_control` breakpoints on
+that path, so the (typically huge, shared) system/tool prefix actually caches.
+Codex (gpt-5) has no native-dialect provider on Copilot's side, so it stays on
+the `openai` provider against the Databricks MLflow chat-completions gateway.
+Gemini is intentionally excluded from both — Databricks' Gemini translation
+layer rejects the `stream_options` field that Copilot CLI sends, so Gemini
+models 400 on every request.
+
+The `anthropic` path needs two things not obvious from `copilot help
+providers`, both confirmed live: Bearer auth, not the `x-api-key` that
+provider type sends by default (Databricks' gateway 401s on it); and a
+well-known model id kept separate from the actual wire id, or Copilot sends
+`temperature`, which current-gen Claude models reject. See render_env_overlay.
+
+That last part only works from Copilot 1.0.81-6 onward — verified live across
+1.0.79 through 1.0.83. Below it, Copilot always sends `temperature` on the
+`anthropic` path regardless of the model id, so Sonnet 5/Opus 5 (which reject
+it outright) 400 on every request; Haiku 4.5 tolerates `temperature` and
+would work either way, but the version gate below applies to every Claude
+model for simplicity. Below 1.0.81-6, Claude models keep the old `openai`
+path — uncached, but that's the status quo, not a regression.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import signal
 import subprocess
 import threading
@@ -31,10 +51,11 @@ from ucode.config_io import (
 )
 from ucode.databricks import (
     TOKEN_REFRESH_INTERVAL_SECONDS,
-    build_copilot_base_url,
+    build_copilot_base_urls,
     get_databricks_token,
 )
 from ucode.state import mark_tool_managed, save_state
+from ucode.telemetry import agent_version
 
 from .args import LaunchOptions
 
@@ -56,6 +77,8 @@ MANAGED_KEYS: list[str] = [
     "COPILOT_PROVIDER_TYPE",
     "COPILOT_PROVIDER_BASE_URL",
     "COPILOT_MODEL",
+    "COPILOT_PROVIDER_MODEL_ID",
+    "COPILOT_PROVIDER_WIRE_MODEL",
     "COPILOT_PROVIDER_BEARER_TOKEN",
     "COPILOT_OFFLINE",
     "OAUTH_TOKEN",
@@ -65,6 +88,28 @@ LEGACY_ENV_KEYS = [
     "OPENAI_API_KEY",
     "COPILOT_PROVIDER_API_KEY",
 ]
+# COPILOT_MODEL (openai) vs COPILOT_PROVIDER_MODEL_ID+COPILOT_PROVIDER_WIRE_MODEL
+# (anthropic) are mutually exclusive — cleared before every write so switching
+# families doesn't leave the other set stale in ~/.copilot/ucode.env.
+_MODEL_SELECTION_KEYS = (
+    "COPILOT_MODEL",
+    "COPILOT_PROVIDER_MODEL_ID",
+    "COPILOT_PROVIDER_WIRE_MODEL",
+)
+
+_CANONICAL_CLAUDE_MODEL_ID_RE = re.compile(r"claude-[a-z0-9]+(?:-[a-z0-9]+)*", re.IGNORECASE)
+# Same Bedrock version-marker pattern usage.py's normalize_price_key strips,
+# e.g. "claude-opus-4-8-v1:0" -> "claude-opus-4-8" — Copilot's catalog doesn't
+# carry the AWS version suffix, so leaving it in re-triggers the "unrecognized
+# model" fallback (including the `temperature` send) this split is for.
+_BEDROCK_VERSION_SUFFIX_RE = re.compile(r"-v\d+(:\d+)?$")
+
+# (major, minor, patch, prerelease) — see the module docstring. A version with
+# no prerelease suffix (a final release) is a 4th component of _UNRELEASED so
+# it always sorts after every prerelease of the same (major, minor, patch).
+MINIMUM_COPILOT_ANTHROPIC_VERSION = (1, 0, 81, 6)
+_UNRELEASED = 999_999
+_COPILOT_VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)(?:-(\d+))?")
 
 
 def default_model(state: dict) -> str | None:
@@ -88,10 +133,54 @@ def default_model(state: dict) -> str | None:
     return None
 
 
+def _is_claude_model(model: str) -> bool:
+    # Every Claude family/model id ucode discovers or pins contains "claude"
+    # (canonical Anthropic names like "claude-sonnet-5", or Bedrock-style
+    # slugs like "us.anthropic.claude-opus-4-8") — same substring check
+    # `databricks.py` already uses elsewhere to special-case the family.
+    return "claude" in model.lower()
+
+
+def _canonical_claude_model_id(model: str) -> str:
+    # e.g. "system.ai.claude-sonnet-5" -> "claude-sonnet-5" — the well-known
+    # name Copilot needs to recognize the model (see render_env_overlay).
+    # Lowercased and stripped of any Bedrock version suffix so it matches
+    # Copilot's catalog regardless of the input's casing or source.
+    match = _CANONICAL_CLAUDE_MODEL_ID_RE.search(model)
+    canonical = match.group(0).lower() if match else model.lower()
+    return _BEDROCK_VERSION_SUFFIX_RE.sub("", canonical)
+
+
+def _parse_copilot_version(value: str) -> tuple[int, int, int, int] | None:
+    match = _COPILOT_VERSION_RE.search(value)
+    if not match:
+        return None
+    major, minor, patch, pre = match.groups()
+    return int(major), int(minor), int(patch), int(pre) if pre is not None else _UNRELEASED
+
+
+def _supports_anthropic_provider() -> bool:
+    version = _parse_copilot_version(agent_version(SPEC["binary"]))
+    return version is not None and version >= MINIMUM_COPILOT_ANTHROPIC_VERSION
+
+
 def render_env_overlay(workspace: str, model: str, token: str) -> dict[str, str]:
+    base_urls = build_copilot_base_urls(workspace)
+    if _is_claude_model(model) and _supports_anthropic_provider():
+        return {
+            "COPILOT_PROVIDER_TYPE": "anthropic",
+            "COPILOT_PROVIDER_BASE_URL": base_urls["anthropic"],
+            # Not COPILOT_MODEL: that would default both ids below to the
+            # unrecognized catalog id and Copilot would send `temperature`.
+            "COPILOT_PROVIDER_MODEL_ID": _canonical_claude_model_id(model),
+            "COPILOT_PROVIDER_WIRE_MODEL": model,
+            "COPILOT_PROVIDER_BEARER_TOKEN": token,  # not API_KEY — see module docstring
+            "COPILOT_OFFLINE": "true",
+            "OAUTH_TOKEN": token,
+        }
     return {
         "COPILOT_PROVIDER_TYPE": "openai",
-        "COPILOT_PROVIDER_BASE_URL": build_copilot_base_url(workspace),
+        "COPILOT_PROVIDER_BASE_URL": base_urls["openai"],
         "COPILOT_MODEL": model,
         "COPILOT_PROVIDER_BEARER_TOKEN": token,
         "COPILOT_OFFLINE": "true",
@@ -157,6 +246,8 @@ def write_tool_config(
     overlay = render_env_overlay(state["workspace"], model, token)
     existing = parse_dotenv(COPILOT_ENV_PATH)
     for key in LEGACY_ENV_KEYS:
+        existing.pop(key, None)
+    for key in _MODEL_SELECTION_KEYS:
         existing.pop(key, None)
     existing.update(overlay)
     write_dotenv(COPILOT_ENV_PATH, existing)

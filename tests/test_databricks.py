@@ -21,6 +21,7 @@ from ucode.databricks import (
     all_users_can_use_schema,
     build_auth_shell_command,
     build_auth_token_argv,
+    build_copilot_base_urls,
     build_databricks_cli_env,
     build_opencode_base_urls,
     build_shared_base_urls,
@@ -114,6 +115,10 @@ class TestBuildToolBaseUrl:
         with pytest.raises(RuntimeError, match="multiple base URLs"):
             build_tool_base_url("opencode", WS)
 
+    def test_copilot_raises(self):
+        with pytest.raises(RuntimeError, match="multiple base URLs"):
+            build_tool_base_url("copilot", WS)
+
     def test_unsupported_tool_raises(self):
         with pytest.raises(RuntimeError, match="Unsupported"):
             build_tool_base_url("unknown", WS)
@@ -127,6 +132,16 @@ class TestBuildOpencodeBaseUrls:
         assert urls["oss"] == f"{WS}/ai-gateway/mlflow/v1"
 
 
+class TestBuildCopilotBaseUrls:
+    def test_anthropic_points_at_the_native_claude_gateway(self):
+        urls = build_copilot_base_urls(WS)
+        assert urls["anthropic"] == f"{WS}/ai-gateway/anthropic"
+
+    def test_openai_points_at_the_mlflow_gateway(self):
+        urls = build_copilot_base_urls(WS)
+        assert urls["openai"] == f"{WS}/ai-gateway/mlflow/v1"
+
+
 class TestBuildSharedBaseUrls:
     def test_contains_all_tools(self):
         urls = build_shared_base_urls(WS)
@@ -134,10 +149,15 @@ class TestBuildSharedBaseUrls:
         assert "claude" in urls
         assert "gemini" in urls
         assert "opencode" in urls
+        assert "copilot" in urls
 
     def test_opencode_is_dict(self):
         urls = build_shared_base_urls(WS)
         assert isinstance(urls["opencode"], dict)
+
+    def test_copilot_is_dict(self):
+        urls = build_shared_base_urls(WS)
+        assert isinstance(urls["copilot"], dict)
 
     def test_codex_url_format(self):
         urls = build_shared_base_urls(WS)

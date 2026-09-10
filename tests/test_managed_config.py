@@ -469,17 +469,25 @@ class TestRefreshManagedConfig:
         assert result is None
         assert flag is True
 
-    def test_feature_disabled_with_a_fallback_does_not_set_the_flag(self, monkeypatch):
-        # A cached config means the launch uses it (not the "no config" branch), so the
-        # feature-off flag is irrelevant and must not be set.
+    def test_feature_disabled_ignores_a_cached_config_and_sets_the_flag(self, monkeypatch):
+        # FEATURE_DISABLED is authoritative, so a config cached while the feature was enabled no
+        # longer applies: report "no config, feature off" and clear the persisted copy so a later
+        # transient failure can't resurrect the disabled policy via the fallback.
+        saved: list[tuple] = []
         reason = 'HTTP 400 Bad Request: {"error_code":"FEATURE_DISABLED"}'
         monkeypatch.setattr(mc_mod, "get_managed_config", lambda ws, tok: (None, reason))
         monkeypatch.setattr(mc_mod, "load_managed_state", lambda ws: MANAGED)
-        monkeypatch.setattr(mc_mod, "print_warning", lambda msg: None)
+        monkeypatch.setattr(mc_mod, "save_managed_state", lambda ws, cfg: saved.append((ws, cfg)))
+        monkeypatch.setattr(
+            mc_mod,
+            "print_warning",
+            lambda msg: pytest.fail("feature-disabled must not warn about falling back to a cache"),
+        )
         state = _state()
         result, flag = refresh_managed_config(state)
-        assert result == MANAGED
-        assert flag is False
+        assert result is None
+        assert flag is True
+        assert saved == [(WORKSPACE, {})]
 
     def test_transient_failure_does_not_set_the_flag(self, monkeypatch):
         monkeypatch.setattr(mc_mod, "get_managed_config", lambda ws, tok: (None, "HTTP 500"))

@@ -15,6 +15,67 @@ from ucode.databricks import AnthropicModelCatalog
 from ucode.smart_routing import claude_hooks, claude_pty, routing, v2
 
 
+class TestManagedModelPicker:
+    def test_reads_model_ids_from_managed_picker(self, tmp_path, monkeypatch):
+        path = tmp_path / "managed-settings.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "modelPicker": {
+                        "options": [
+                            {"model": "system.ai.claude-opus-4-8", "label": "Opus"},
+                            {"model": "system.ai.claude-sonnet-5", "label": "Sonnet"},
+                        ]
+                    }
+                }
+            )
+        )
+        monkeypatch.setattr(claude, "_managed_settings_path", lambda: path)
+
+        catalog = v2._model_picker_catalog()
+
+        assert catalog is not None
+        assert catalog.model_ids == ["system.ai.claude-opus-4-8", "system.ai.claude-sonnet-5"]
+        assert catalog.model_id_to_display_name == {}
+
+    def test_ignores_empty_or_missing_picker(self, tmp_path, monkeypatch):
+        path = tmp_path / "managed-settings.json"
+        path.write_text(json.dumps({"env": {}}))
+        monkeypatch.setattr(claude, "_managed_settings_path", lambda: path)
+        monkeypatch.setattr(claude, "CLAUDE_SETTINGS_PATH", tmp_path / "ucode-settings.json")
+
+        assert v2._model_picker_catalog() is None
+
+    def test_falls_back_to_ucode_settings_picker(self, tmp_path, monkeypatch):
+        managed = tmp_path / "managed-settings.json"
+        managed.write_text(json.dumps({"env": {}}))
+        ucode_settings = tmp_path / "ucode-settings.json"
+        ucode_settings.write_text(
+            json.dumps({"modelPicker": {"options": [{"model": "system.ai.claude-opus-5"}]}})
+        )
+        monkeypatch.setattr(claude, "_managed_settings_path", lambda: managed)
+        monkeypatch.setattr(claude, "CLAUDE_SETTINGS_PATH", ucode_settings)
+
+        catalog = v2._model_picker_catalog()
+
+        assert catalog is not None
+        assert catalog.model_ids == ["system.ai.claude-opus-5"]
+
+    def test_falls_back_to_user_settings_picker(self, tmp_path, monkeypatch):
+        user_settings = tmp_path / "settings.json"
+        user_settings.write_text(
+            json.dumps({"modelPicker": {"options": [{"model": "system.ai.claude-sonnet-5"}]}})
+        )
+        monkeypatch.setattr(claude, "_managed_settings_path", lambda: tmp_path / "missing-managed")
+        monkeypatch.setattr(claude, "CLAUDE_SETTINGS_PATH", tmp_path / "missing-ucode")
+        monkeypatch.setattr(claude, "CLAUDE_USER_SETTINGS_PATH", user_settings)
+
+        catalog = v2._model_picker_catalog()
+
+        assert catalog is not None
+        assert catalog.model_ids == ["system.ai.claude-sonnet-5"]
+
+
 class TestDirectModelCommand:
     @pytest.mark.parametrize(
         "name",
@@ -104,6 +165,10 @@ class TestFirstPromptHook:
 
 
 class TestV2Launch:
+    def test_strips_gateway_prefix_for_interposer(self):
+        model = "anthropic-aigw-73ea02b2-system.ai.glm-5-2"
+        assert v2._unwrapped_claude_model_id(model) == "system.ai.glm-5-2"
+
     def test_restores_model_captured_immediately_before_switch(self, tmp_path, monkeypatch):
         ucode_settings = tmp_path / "ucode-settings.json"
         user_settings = tmp_path / "settings.json"

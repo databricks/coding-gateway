@@ -63,7 +63,6 @@ class TestOpencodeSpec:
     def test_supported_version_needs_no_required_update(self, monkeypatch):
         monkeypatch.setattr(opencode, "agent_version", lambda _binary: "1.0.220")
 
-        assert opencode.required_update_message() is None
         assert opencode.minimum_version_error() is None
 
 

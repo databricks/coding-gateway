@@ -36,6 +36,8 @@ from ucode.databricks import (
 )
 from ucode.state import mark_tool_managed, save_state
 
+from .args import LaunchOptions
+
 COPILOT_CONFIG_DIR = Path.home() / ".copilot"
 COPILOT_ENV_PATH = COPILOT_CONFIG_DIR / "ucode.env"
 COPILOT_MCP_CONFIG_PATH = COPILOT_CONFIG_DIR / "ucode-mcp-config.json"
@@ -179,7 +181,7 @@ def _refresh_forever(state: dict, stop_event: threading.Event) -> None:
             continue
 
 
-def launch(state: dict, tool_args: list[str]) -> None:
+def launch(state: dict, tool_args: list[str], *, options: LaunchOptions) -> None:
     model, token = _refresh_token_once(state)
     env = build_runtime_env(state["workspace"], model, token)
 

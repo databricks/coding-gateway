@@ -33,6 +33,8 @@ from ucode.state import (
 )
 from ucode.telemetry import agent_version, ucode_version
 
+from .args import LaunchOptions
+
 GEMINI_CONFIG_DIR = Path.home() / ".gemini"
 GEMINI_ENV_PATH = GEMINI_CONFIG_DIR / "ucode.env"
 GEMINI_BACKUP_PATH = APP_DIR / "gemini-ucode-env.backup"
@@ -228,7 +230,7 @@ def _refresh_forever(state: dict, stop_event: threading.Event) -> None:
             continue
 
 
-def launch(state: dict, tool_args: list[str]) -> None:
+def launch(state: dict, tool_args: list[str], *, options: LaunchOptions) -> None:
     provider = get_provider_service(state, "gemini")
     token = _refresh_token_once(state)
     model = _launch_model(state, provider)

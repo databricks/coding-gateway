@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import cast
+from typing import NamedTuple, cast
 
 import ucode.config_io as config_io
 from ucode.databricks import (
@@ -39,10 +39,6 @@ from ucode.databricks import (
 from ucode.ui import console, print_warning
 
 MANAGED_STATE_PATH = config_io.APP_DIR / "managed-state.json"
-
-# Opt-in switch while the feature is in bug bash: unset means launches ignore managed configs
-# entirely and behave exactly as they did before.
-MANAGED_CONFIG_ENV_VAR = "ENABLE_MANAGED_AGENT_CONFIG"
 
 # Shown to a developer when their workspace has no admin-defined managed config yet — the normal
 # case, not an error. Kept here so the CLI (which surfaces it) uses one consistent message.
@@ -72,6 +68,22 @@ MCP_TYPE_ENUM_TO_TAG: dict[str, str] = {
     "MCP_SERVER_TYPE_DATABRICKS_APP": "app",
     "MCP_SERVER_TYPE_DATABRICKS_SQL": "sql",
 }
+
+
+class FetchedManagedConfig(NamedTuple):
+    """A managed-config read: the normalized ``manifest`` (None when the workspace has none) and,
+    when the read did not settle the question, the ``reason`` it failed (None on a clean answer)."""
+
+    manifest: dict | None
+    reason: str | None
+
+
+class ManagedConfigResult(NamedTuple):
+    """The launch-path refresh outcome: the ``manifest`` to apply (None when absent or dropped) and
+    ``feature_disabled``, True when the coding-agent-configs feature is off server-side."""
+
+    manifest: dict | None
+    feature_disabled: bool
 
 
 def _as_dict(value: object) -> dict[str, object]:
@@ -292,34 +304,34 @@ def get_model_recommendation(workspace: str, token: str) -> tuple[dict | None, s
     }, None
 
 
-def get_managed_config(workspace: str, token: str) -> tuple[dict | None, str | None]:
+def get_managed_config(workspace: str, token: str) -> FetchedManagedConfig:
     """Fetch and normalize the workspace's managed config.
 
-    Returns ``(config, reason)``:
-    - ``(config, None)`` — the normalized manifest for the workspace's single config;
-    - ``(None, None)`` — the workspace definitively has no managed config (not an error);
-    - ``(None, reason)`` — the read didn't settle the question; ``reason`` says why.
+    Returns a :class:`FetchedManagedConfig`:
+    - ``manifest`` set, ``reason`` None — the normalized manifest for the workspace's single config;
+    - both None — the workspace definitively has no managed config (not an error);
+    - ``manifest`` None, ``reason`` set — the read didn't settle the question; ``reason`` says why.
 
-    The distinction matters to callers that cache: only ``(None, None)`` is authoritative enough to
-    clear a previously stored config. "No config defined" arrives two ways depending on the backend
-    — an empty listing (HTTP 200 with no configs) or a NOT_FOUND — and both collapse to
-    ``(None, None)``. Anything else, including a PERMISSION_DENIED, leaves the question unanswered
-    and is surfaced as a failure: an admin may have published a config the developer can't read,
-    which they need to know about rather than silently launch without.
+    The distinction matters to callers that cache: only "both None" is authoritative enough to clear
+    a previously stored config. "No config defined" arrives two ways depending on the backend — an
+    empty listing (HTTP 200 with no configs) or a NOT_FOUND — and both collapse to "both None".
+    Anything else, including a PERMISSION_DENIED, leaves the question unanswered and is surfaced as a
+    failure: an admin may have published a config the developer can't read, which they need to know
+    about rather than silently launch without.
 
     v0 stores at most one config per workspace, so the first entry is the workspace's config.
     """
     configs, reason = fetch_managed_coding_agent_configs(workspace, token)
     if reason is not None:
         if _is_feature_disabled(reason):
-            return None, reason
+            return FetchedManagedConfig(None, reason)
         # A NOT_FOUND means the admin hasn't defined a config for this workspace — not a failure.
         if _is_not_found(reason):
-            return None, None
-        return None, reason
+            return FetchedManagedConfig(None, None)
+        return FetchedManagedConfig(None, reason)
     if not configs:
-        return None, None
-    return normalize_managed_config(configs[0]), None
+        return FetchedManagedConfig(None, None)
+    return FetchedManagedConfig(normalize_managed_config(configs[0]), None)
 
 
 def _is_not_found(reason: str) -> bool:
@@ -406,8 +418,8 @@ def managed_state_workspace() -> str | None:
     return workspace if isinstance(workspace, str) and workspace else None
 
 
-def refresh_managed_config(state: dict) -> tuple[dict | None, bool]:
-    """Fetch the workspace's managed config and persist it, returning ``(manifest, coding_agent_config_feature_disabled)``.
+def refresh_managed_config(state: dict) -> ManagedConfigResult:
+    """Fetch the workspace's managed config and persist it as a :class:`ManagedConfigResult`.
 
     Runs on every launch so a developer picks up an admin's edits without re-running
     ``ucode configure``. The manifest is None when the workspace has no managed config — the normal
@@ -416,33 +428,38 @@ def refresh_managed_config(state: dict) -> tuple[dict | None, bool]:
     A failed fetch never blocks the launch: an unreachable control plane shouldn't stop someone from
     coding. Instead it falls back to the last config persisted for this workspace, so the admin's
     most recent known policy still applies; only when there is no persisted config either does the
-    launch fall through to the developer's own settings.
+    launch fall through to the developer's own settings. ``FEATURE_DISABLED`` is the exception — it
+    is an authoritative "off", not a transient failure, so it drops the cache rather than falling
+    back (see below).
 
-    ``coding_agent_config_feature_disabled`` is True when the gateway returned ``FEATURE_DISABLED`` and there was no
-    persisted config to fall back on — the coding-agent-configs feature isn't enabled server-side,
-    so callers suppress the ``ucode setup`` recommendation.
+    ``coding_agent_config_feature_disabled`` is True whenever the gateway returned ``FEATURE_DISABLED`` —
+    the coding-agent-configs feature isn't enabled server-side, so callers suppress the ``ucode
+    setup`` recommendation. A config cached from when the feature was enabled is discarded in that
+    case (returned manifest is None), so a launch doesn't re-apply a policy the workspace has turned
+    off and ``ug configure`` doesn't route into a managed-setup flow that would dead-end.
     """
     workspace = state.get("workspace")
     if not workspace:
-        return None, False
+        return ManagedConfigResult(None, False)
     try:
         token = get_databricks_token(workspace, state.get("profile"))
     except RuntimeError as exc:
-        return _persisted_fallback(workspace, str(exc)), False
+        return ManagedConfigResult(_persisted_fallback(workspace, str(exc)), False)
     managed, reason = get_managed_config(workspace, token)
     if reason is not None:
-        # A refused read leaves the cached config alone: it says nothing about whether the admin's
-        # config still exists, unlike a successful "no config" answer below.
+        if _is_feature_disabled(reason):
+            save_managed_state(workspace, {})
+            return ManagedConfigResult(None, True)
         fallback = _persisted_fallback(workspace, reason, refused=_is_permission_denied(reason))
-        return fallback, _is_feature_disabled(reason) and fallback is None
+        return ManagedConfigResult(fallback, False)
     if managed is None:
         # Record that this workspace has no config, rather than leaving an earlier one on disk:
         # the file doubles as the fallback above, so a removed policy would otherwise come back
         # into force after the next transient outage.
         save_managed_state(workspace, {})
-        return None, False
+        return ManagedConfigResult(None, False)
     save_managed_state(workspace, managed)
-    return managed, False
+    return ManagedConfigResult(managed, False)
 
 
 def _is_feature_disabled(reason: str) -> bool:
@@ -498,11 +515,3 @@ def _summarize_read_failure(reason: str) -> str:
         return status.strip()
     condensed = " ".join(reason.split())
     return condensed if len(condensed) <= 160 else condensed[:157] + "..."
-
-
-def managed_agent_config_enabled() -> bool:
-    """True when managed coding-agent configs are switched on for this run.
-
-    Opt-in while the feature is being bug-bashed: without the env var set, launches behave exactly
-    as they did before and never read the workspace's config."""
-    return os.environ.get(MANAGED_CONFIG_ENV_VAR, "").strip().lower() in ("1", "true", "yes")

@@ -14,7 +14,13 @@ GitHub Copilot CLI, and Pi through Databricks.
 ## Installation
 
 ```bash
-uv tool install git+https://github.com/databricks/ucode
+uv tool install git+https://github.com/databricks/unity-gateway
+```
+
+To enable the optional custom-client OAuth flow, install the `custom-oauth` extra:
+
+```bash
+uv tool install "ucode[custom-oauth] @ git+https://github.com/databricks/unity-gateway"
 ```
 
 Check your version with `ug --version`. Between releases this looks like
@@ -58,9 +64,9 @@ ug claude --enable-smart-routing
 ```
 
 The flag applies only to that launch; later launches use normal model selection unless the flag is
-passed again. Smart routing uses the `task_v1` router by default. Power users can select another
+passed again. Smart routing uses the `task_v2` router by default. Power users can select another
 router for a launch by setting `SMART_ROUTER_NAME`, for example
-`SMART_ROUTER_NAME=task_v2 ug codex --enable-smart-routing`.
+`SMART_ROUTER_NAME=task_v1 ug codex --enable-smart-routing`.
 
 To configure all tools at once:
 
@@ -367,8 +373,7 @@ The output looks like:
 | `ug status` | Show current workspace, base URLs, managed config files, and selected models |
 | `ug export` | Print the workspace's managed config as portable JSON (`--file <file>` / `-f` to write a file) |
 | `ug doctor` | Diagnose local issues (uv, npm, Databricks CLI, workspace, credentials, agent CLIs, tracing) and offer to fix any problems found |
-| `ug usage` | Show AI Gateway usage summary, plus your budget spend against its alert threshold when the workspace reports one |
-| `ug usage --warehouse-id <id>` | Query a specific SQL warehouse instead of discovering one |
+| `ug usage` | Show your AI Gateway dollars spent and total budget |
 | `ug revert` | Clear saved state and restore backed-up config files |
 | `ug configure --dry-run` | Preview config files without writing them |
 | `ug configure --agents claude,codex` | Configure specific agents without the interactive picker |
@@ -444,8 +449,8 @@ Contributions are welcome.
 ### Getting started
 
 ```bash
-git clone https://github.com/databricks/ucode
-cd ucode
+git clone https://github.com/databricks/unity-gateway
+cd unity-gateway
 uv sync
 ```
 

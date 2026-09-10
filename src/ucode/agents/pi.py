@@ -50,6 +50,8 @@ from ucode.databricks import (
 from ucode.state import mark_tool_managed, save_state
 from ucode.telemetry import agent_version, ucode_version
 
+from .args import LaunchOptions
+
 PI_UCODE_HOME = APP_DIR / "pi-home"
 PI_CONFIG_DIR = PI_UCODE_HOME / ".pi" / "agent"
 PI_CONFIG_PATH = PI_CONFIG_DIR / "models.json"
@@ -281,7 +283,7 @@ def build_runtime_env(token: str) -> dict[str, str]:
     return env
 
 
-def launch(state: dict, tool_args: list[str]) -> None:
+def launch(state: dict, tool_args: list[str], *, options: LaunchOptions) -> None:
     token = _refresh_token_once(state)
     env = build_runtime_env(token)
 

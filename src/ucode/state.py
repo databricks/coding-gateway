@@ -3,8 +3,14 @@
 from __future__ import annotations
 
 import json
+from typing import cast
 
 from ucode.config_io import APP_DIR, is_dry_run
+from ucode.custom_oauth import (
+    CustomOAuthConfig,
+    build_custom_auth_shell_command,
+    build_custom_auth_token_argv,
+)
 from ucode.databricks import (
     build_auth_shell_command,
     build_auth_token_argv,
@@ -163,6 +169,15 @@ def build_agent_state(state: dict) -> dict[str, dict]:
     use_pat = bool(state.get("use_pat"))
     auth_command = build_auth_shell_command(workspace, profile, use_pat=use_pat)
     auth_argv = build_auth_token_argv(workspace, profile, use_pat=use_pat)
+    claude_auth_command = auth_command
+    codex_auth_command = auth_command
+    codex_auth_argv = auth_argv
+    custom_oauth = state.get("custom_oauth")
+    if isinstance(custom_oauth, dict):
+        typed_custom_oauth = cast(CustomOAuthConfig, custom_oauth)
+        claude_auth_command = build_custom_auth_shell_command(workspace, typed_custom_oauth)
+        codex_auth_command = claude_auth_command
+        codex_auth_argv = build_custom_auth_token_argv(workspace, typed_custom_oauth)
     claude_models_value = state.get("claude_models")
     claude_models: dict = claude_models_value if isinstance(claude_models_value, dict) else {}
     codex_models_value = state.get("codex_models")
@@ -187,7 +202,7 @@ def build_agent_state(state: dict) -> dict[str, dict]:
         "claude": {
             "model": claude_model,
             "base_url": base_urls.get("claude"),
-            "auth_command": auth_command,
+            "auth_command": claude_auth_command,
             "auth_refresh_interval_ms": AUTH_REFRESH_INTERVAL_MS,
             "env": {
                 "ANTHROPIC_BASE_URL": base_urls.get("claude"),
@@ -201,10 +216,10 @@ def build_agent_state(state: dict) -> dict[str, dict]:
         "codex": {
             "model": codex_model,
             "base_url": base_urls.get("codex"),
-            "auth_command": auth_command,
+            "auth_command": codex_auth_command,
             "auth": {
-                "command": auth_argv[0],
-                "args": auth_argv[1:],
+                "command": codex_auth_argv[0],
+                "args": codex_auth_argv[1:],
                 "timeout_ms": AUTH_COMMAND_TIMEOUT_MS,
                 "refresh_interval_ms": AUTH_REFRESH_INTERVAL_MS,
             },

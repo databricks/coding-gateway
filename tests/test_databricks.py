@@ -28,7 +28,6 @@ from ucode.databricks import (
     build_tool_base_url,
     classify_model_family,
     databricks_cli_version,
-    discover_sql_warehouses,
     ensure_databricks_cli_version,
     ensure_pat_bearer,
     get_databricks_profiles,
@@ -224,6 +223,24 @@ class TestDiscoverClaudeModels:
 
         assert reason is None
         assert models["opus"] == "databricks-claude-opus-4-8"
+
+    def test_buckets_system_ai_claude_models(self, monkeypatch):
+        payload = {
+            "data": [
+                {"id": "system.ai.claude-opus-4-8"},
+                {"id": "system.ai.claude-sonnet-4-6"},
+                {"id": "system.ai.glm-5-3-flash"},
+            ]
+        }
+        monkeypatch.setattr(db_mod, "_http_get_json", lambda *_args, **_kwargs: (payload, None))
+
+        models, reason = db_mod.discover_claude_models(WS, "token")
+
+        assert reason is None
+        assert models == {
+            "opus": "system.ai.claude-opus-4-8",
+            "sonnet": "system.ai.claude-sonnet-4-6",
+        }
 
     def test_buckets_fable_family(self, monkeypatch):
         payload = {
@@ -1974,7 +1991,7 @@ class TestListDatabricksApps:
 
 
 class TestProbeUnityGatewayCapabilities:
-    def test_model_service_resource_skips_legacy_probe(self, monkeypatch):
+    def test_model_service_resource_returns_success(self, monkeypatch):
         calls: list[str] = []
 
         def fake_get(url, token):
@@ -2029,8 +2046,6 @@ class TestProbeUnityGatewayCapabilities:
 
         def fake_get(url, token):
             calls.append(url)
-            if "/api/ai-gateway/v2/endpoints" in url:
-                return {"endpoints": []}, None
             return next(responses)
 
         monkeypatch.setattr(db_mod, "_http_get_json", fake_get)
@@ -2046,7 +2061,6 @@ class TestProbeUnityGatewayCapabilities:
             f"https://{WS_HOST}/api/2.1/unity-catalog/model-services?page_size=50",
             f"https://{WS_HOST}/api/2.1/unity-catalog/model-services?page_size=50"
             "&page_token=cursor-1",
-            f"https://{WS_HOST}/api/ai-gateway/v2/endpoints?page_size=1",
         ]
 
     def test_empty_model_service_response_includes_permission_hint(self, monkeypatch):
@@ -2064,88 +2078,27 @@ class TestProbeUnityGatewayCapabilities:
             "USE SCHEMA and EXECUTE on system.ai",
         )
 
-    def test_legacy_only_workspace_returns_model_service_probe(self, monkeypatch):
+    def test_model_service_unavailable_raises(self, monkeypatch):
         calls: list[str] = []
 
         def fake_get(url, token):
             calls.append(url)
-            if "/api/2.1/unity-catalog/model-services" in url:
-                return None, "HTTP 404: Not Found"
-            return {"endpoints": []}, None
+            return None, "HTTP 404: model services unavailable"
 
         monkeypatch.setattr(db_mod, "_http_get_json", fake_get)
 
-        model_service_probe = db_mod.probe_unity_gateway_capabilities(WS, "fake-token")
-
-        assert model_service_probe == db_mod.GatewayProbe(False, "HTTP 404: Not Found")
-        assert calls == [
-            f"https://{WS_HOST}/api/2.1/unity-catalog/model-services?page_size=50",
-            f"https://{WS_HOST}/api/ai-gateway/v2/endpoints?page_size=1",
-        ]
-
-    def test_model_service_forbidden_still_succeeds_when_legacy_is_available(self, monkeypatch):
-        calls: list[str] = []
-
-        def fake_get(url, token):
-            calls.append(url)
-            if "/api/2.1/unity-catalog/model-services" in url:
-                return None, "HTTP 403: Forbidden"
-            return {"endpoints": []}, None
-
-        monkeypatch.setattr(db_mod, "_http_get_json", fake_get)
-
-        model_service_probe = db_mod.probe_unity_gateway_capabilities(WS, "fake-token")
-
-        assert model_service_probe == db_mod.GatewayProbe(False, "HTTP 403: Forbidden")
-        assert calls == [
-            f"https://{WS_HOST}/api/2.1/unity-catalog/model-services?page_size=50",
-            f"https://{WS_HOST}/api/ai-gateway/v2/endpoints?page_size=1",
-        ]
-
-    def test_empty_model_service_requires_reachable_legacy_fallback(self, monkeypatch):
-        responses = iter(
-            [
-                ({}, None),
-                (None, "HTTP 404: AI Gateway V2 is not available for CSP-enabled workspaces"),
-            ]
-        )
-        monkeypatch.setattr(
-            db_mod,
-            "_http_get_json",
-            lambda url, token: next(responses),
-        )
-
-        with pytest.raises(RuntimeError, match="no accessible model services") as excinfo:
+        with pytest.raises(RuntimeError, match="not enabled") as excinfo:
             db_mod.probe_unity_gateway_capabilities(WS, "fake-token")
 
         message = str(excinfo.value)
-        assert "HTTP 404: AI Gateway legacy endpoint is not available" in message
+        assert "HTTP 404: model services unavailable" in message
+        # surfaced errors must stay free of internal version vocabulary
         assert "v2" not in message.lower()
         assert "v3" not in message.lower()
+        assert "legacy" not in message.lower()
+        assert calls == [f"https://{WS_HOST}/api/2.1/unity-catalog/model-services?page_size=50"]
 
-    def test_neither_gateway_available_raises(self, monkeypatch):
-        reasons = iter(
-            [
-                "HTTP 404: V3 unavailable",
-                "HTTP 404: V2 unavailable",
-            ]
-        )
-        monkeypatch.setattr(
-            db_mod,
-            "_http_get_json",
-            lambda url, token: (None, next(reasons)),
-        )
-
-        with pytest.raises(RuntimeError, match="neither model services") as excinfo:
-            db_mod.probe_unity_gateway_capabilities(WS, "fake-token")
-
-        message = str(excinfo.value)
-        assert "HTTP 404: model service unavailable" in message
-        assert "HTTP 404: legacy endpoint unavailable" in message
-        assert "v2" not in message.lower()
-        assert "v3" not in message.lower()
-
-    def test_model_service_auth_failure_does_not_probe_legacy(self, monkeypatch):
+    def test_model_service_auth_failure_raises(self, monkeypatch):
         calls: list[str] = []
 
         def fake_get(url, token):
@@ -2159,7 +2112,7 @@ class TestProbeUnityGatewayCapabilities:
 
         assert calls == [f"https://{WS_HOST}/api/2.1/unity-catalog/model-services?page_size=50"]
 
-    def test_missing_scope_403_on_both_paths_routes_to_reauth_not_grants(self, monkeypatch):
+    def test_missing_scope_403_routes_to_reauth_not_grants(self, monkeypatch):
         calls: list[str] = []
 
         def fake_get(url, token):
@@ -2178,35 +2131,9 @@ class TestProbeUnityGatewayCapabilities:
         assert "databricks auth login" in message
         assert "USE CATALOG" not in message
         assert "USE SCHEMA" not in message
-        assert calls == [
-            f"https://{WS_HOST}/api/2.1/unity-catalog/model-services?page_size=50",
-            f"https://{WS_HOST}/api/ai-gateway/v2/endpoints?page_size=1",
-        ]
+        assert calls == [f"https://{WS_HOST}/api/2.1/unity-catalog/model-services?page_size=50"]
 
-    def test_model_service_scope_403_succeeds_when_legacy_reachable(self, monkeypatch):
-        calls: list[str] = []
-
-        def fake_get(url, token):
-            calls.append(url)
-            if "/api/ai-gateway/v2/endpoints" in url:
-                return {"endpoints": [{"name": "databricks-gpt-5"}]}, None
-            return None, (
-                "HTTP 403 Forbidden: Provided OAuth token does not have required "
-                "scopes: unity-catalog"
-            )
-
-        monkeypatch.setattr(db_mod, "_http_get_json", fake_get)
-
-        model_service_probe = db_mod.probe_unity_gateway_capabilities(WS, "fake-token")
-
-        assert not model_service_probe.reachable
-        assert "required scopes" in model_service_probe.detail
-        assert calls == [
-            f"https://{WS_HOST}/api/2.1/unity-catalog/model-services?page_size=50",
-            f"https://{WS_HOST}/api/ai-gateway/v2/endpoints?page_size=1",
-        ]
-
-    def test_probe_v3_later_page_error_is_reachable_not_empty(self, monkeypatch):
+    def test_probe_model_services_later_page_error_is_reachable_not_empty(self, monkeypatch):
         responses = iter(
             [
                 ({"next_page_token": "cursor-1"}, None),
@@ -2215,11 +2142,13 @@ class TestProbeUnityGatewayCapabilities:
         )
         monkeypatch.setattr(db_mod, "_http_get_json", lambda url, token: next(responses))
 
-        assert db_mod._probe_ai_gateway_v3(WS, "fake-token") == db_mod.GatewayProbe(
+        assert db_mod._probe_model_services(WS, "fake-token") == db_mod.GatewayProbe(
             True, "reachable", conclusive=False
         )
 
-    def test_probe_v3_page_cap_with_pending_cursor_is_reachable_not_empty(self, monkeypatch):
+    def test_probe_model_services_page_cap_with_pending_cursor_is_reachable_not_empty(
+        self, monkeypatch
+    ):
         calls: list[str] = []
 
         def fake_get(url, token):
@@ -2228,27 +2157,20 @@ class TestProbeUnityGatewayCapabilities:
 
         monkeypatch.setattr(db_mod, "_http_get_json", fake_get)
 
-        assert db_mod._probe_ai_gateway_v3(WS, "fake-token") == db_mod.GatewayProbe(
+        assert db_mod._probe_model_services(WS, "fake-token") == db_mod.GatewayProbe(
             True, "reachable", conclusive=False
         )
         assert len(calls) == db_mod._MODEL_SERVICE_PROBE_MAX_PAGES
 
-    def test_inconclusive_model_service_probe_does_not_hard_fail_when_legacy_unavailable(
-        self, monkeypatch
-    ):
-        v3_responses = iter(
+    def test_inconclusive_model_service_probe_returns_reachable(self, monkeypatch):
+        responses = iter(
             [
                 ({"next_page_token": "cursor-1"}, None),
                 (None, "HTTP 500: Internal Server Error"),
             ]
         )
 
-        def fake_get(url, token):
-            if "/api/ai-gateway/v2/endpoints" in url:
-                return None, "HTTP 404: AI Gateway V2 is not available for CSP-enabled workspaces"
-            return next(v3_responses)
-
-        monkeypatch.setattr(db_mod, "_http_get_json", fake_get)
+        monkeypatch.setattr(db_mod, "_http_get_json", lambda url, token: next(responses))
 
         assert db_mod.probe_unity_gateway_capabilities(WS, "fake-token") == db_mod.GatewayProbe(
             True, "reachable", conclusive=False
@@ -2263,55 +2185,27 @@ class TestProbeUnityGatewayCapabilities:
         )
         assert not db_mod._looks_like_scope_failure("HTTP 403: Missing Unity Catalog grants")
 
-    def test_model_service_forbidden_and_legacy_unavailable_reports_permission_error(
-        self, monkeypatch
-    ):
-        reasons = iter(
-            [
-                "HTTP 403: Missing Unity Catalog grants",
-                "HTTP 404: legacy endpoints unavailable",
-            ]
-        )
-        monkeypatch.setattr(
-            db_mod,
-            "_http_get_json",
-            lambda url, token: (None, next(reasons)),
-        )
+    def test_model_service_forbidden_reports_permission_error(self, monkeypatch):
+        calls: list[str] = []
 
-        with pytest.raises(RuntimeError, match="permission") as excinfo:
+        def fake_get(url, token):
+            calls.append(url)
+            return None, "HTTP 403: Missing Unity Catalog grants"
+
+        monkeypatch.setattr(db_mod, "_http_get_json", fake_get)
+
+        with pytest.raises(RuntimeError, match="model service access could not be verified") as e:
             db_mod.probe_unity_gateway_capabilities(WS, "fake-token")
 
-        message = str(excinfo.value)
+        message = str(e.value)
         assert "USE SCHEMA" in message
         assert "EXECUTE" in message
         assert "v2" not in message.lower()
         assert "v3" not in message.lower()
+        assert "legacy" not in message.lower()
         assert "rejected the access token" not in message
         assert "not enabled" not in message
-
-    def test_legacy_forbidden_and_model_service_unavailable_reports_permission_error(
-        self, monkeypatch
-    ):
-        reasons = iter(
-            [
-                "HTTP 404: V3 unavailable",
-                "HTTP 403: V2 forbidden",
-            ]
-        )
-        monkeypatch.setattr(
-            db_mod,
-            "_http_get_json",
-            lambda url, token: (None, next(reasons)),
-        )
-
-        with pytest.raises(RuntimeError, match="workspace permissions") as excinfo:
-            db_mod.probe_unity_gateway_capabilities(WS, "fake-token")
-
-        message = str(excinfo.value)
-        assert "legacy endpoint access could not be verified" in message
-        assert "v2" not in message.lower()
-        assert "v3" not in message.lower()
-        assert "USE SCHEMA" not in message
+        assert calls == [f"https://{WS_HOST}/api/2.1/unity-catalog/model-services?page_size=50"]
 
 
 class TestHttpGetJsonReason:
@@ -2566,113 +2460,6 @@ class TestRunDatabricksCliInstaller:
         # databricks/tap and fails if absent, rather than falling back to the
         # unrelated `databricks` cask.
         assert calls == [["brew", brew_subcommand, "databricks/tap/databricks"]]
-
-
-class TestIsUsageTableAccessError:
-    """Pin which `ServerOperationError` strings trigger the friendly
-    `system.ai_gateway.usage` permissions hint vs. fall through to the
-    generic `Usage query failed: ...` arm."""
-
-    @staticmethod
-    def _err(msg: str):
-        from databricks.sql.exc import ServerOperationError
-
-        return ServerOperationError(msg)
-
-    def test_table_level_select_denial_matches(self):
-        msg = (
-            "[INSUFFICIENT_PERMISSIONS] Insufficient privileges: "
-            "User does not have SELECT on Table 'system.ai_gateway.usage'. "
-            "SQLSTATE: 42501"
-        )
-        assert db_mod._is_usage_table_access_error(self._err(msg)) is True
-
-    def test_schema_level_use_schema_denial_matches(self):
-        msg = (
-            "[INSUFFICIENT_PERMISSIONS] Insufficient privileges: "
-            "User does not have USE SCHEMA on Schema 'system.ai_gateway'. "
-            "SQLSTATE: 42501"
-        )
-        assert db_mod._is_usage_table_access_error(self._err(msg)) is True
-
-    def test_unrelated_catalog_denial_falls_through(self):
-        msg = (
-            "[INSUFFICIENT_PERMISSIONS] Insufficient privileges: "
-            "User does not have USE CATALOG on Catalog 'schema1'. "
-            "SQLSTATE: 42501"
-        )
-        assert db_mod._is_usage_table_access_error(self._err(msg)) is False
-
-    def test_other_error_code_on_same_table_falls_through(self):
-        """Different code on the right table must not trip the gate — the
-        helper requires INSUFFICIENT_PERMISSIONS specifically so we don't
-        mask e.g. missing-table failures with a permissions-shaped hint."""
-        msg = (
-            "[TABLE_OR_VIEW_NOT_FOUND] The table or view "
-            "`system`.`ai_gateway`.`usage` cannot be found. SQLSTATE: 42P01"
-        )
-        assert db_mod._is_usage_table_access_error(self._err(msg)) is False
-
-    @pytest.mark.parametrize(
-        "quoted",
-        [
-            "`system`.`ai_gateway`.`usage`",
-            "[system].[ai_gateway].[usage]",
-        ],
-    )
-    def test_identifier_quoting_variants_all_match(self, quoted):
-        msg = (
-            f"[INSUFFICIENT_PERMISSIONS] User does not have SELECT on Table "
-            f"{quoted}. SQLSTATE: 42501"
-        )
-        assert db_mod._is_usage_table_access_error(self._err(msg)) is True
-
-
-class TestRunUsageQuery:
-    """Cover the two control-flow arms `_is_usage_table_access_error` gates:
-    friendly RuntimeError for matching errors, raw-text fallback for the rest.
-    `from exc` chaining is also pinned so `--debug` still surfaces the
-    underlying connector error."""
-
-    @staticmethod
-    def _patch_connect_to_raise(monkeypatch, exc):
-        import databricks.sql as sql_mod
-
-        def fake_connect(*args, **kwargs):
-            raise exc
-
-        monkeypatch.setattr(sql_mod, "connect", fake_connect)
-
-    def test_raises_actionable_message_for_table_access_error(self, monkeypatch):
-        from databricks.sql.exc import ServerOperationError
-
-        original = ServerOperationError(
-            "[INSUFFICIENT_PERMISSIONS] Insufficient privileges: "
-            "User does not have SELECT on Table 'system.ai_gateway.usage'. "
-            "SQLSTATE: 42501"
-        )
-        self._patch_connect_to_raise(monkeypatch, original)
-
-        with pytest.raises(RuntimeError, match="Ask your workspace admin") as exc_info:
-            db_mod.run_usage_query(WS, "/sql/1.0/warehouses/abc", "tok", "SELECT 1")
-        assert "system.ai_gateway.usage" in str(exc_info.value)
-        # The original ServerOperationError must survive on __cause__ so
-        # `--debug` / stack traces still show the underlying connector error.
-        assert exc_info.value.__cause__ is original
-
-    def test_falls_through_for_unrelated_permission_error(self, monkeypatch):
-        from databricks.sql.exc import ServerOperationError
-
-        original = ServerOperationError(
-            "[INSUFFICIENT_PERMISSIONS] Insufficient privileges: "
-            "User does not have USE CATALOG on Catalog 'schema1'. SQLSTATE: 42501"
-        )
-        self._patch_connect_to_raise(monkeypatch, original)
-
-        with pytest.raises(RuntimeError, match="schema1") as exc_info:
-            db_mod.run_usage_query(WS, "/sql/1.0/warehouses/abc", "tok", "SELECT 1")
-        assert "Ask your workspace admin" not in str(exc_info.value)
-        assert str(exc_info.value).startswith("Usage query failed:")
 
 
 class TestHttpGetJsonTimeout:
@@ -3157,6 +2944,7 @@ class TestCodingAgentConfigCrudClients:
         assert "budget_id" not in db_mod.MANAGED_CONFIG_UPDATE_MASK_PATHS
         assert "default_options" not in db_mod.MANAGED_CONFIG_UPDATE_MASK_PATHS
         assert "tiers" not in db_mod.MANAGED_CONFIG_UPDATE_MASK_PATHS
+        assert "spec_version" not in db_mod.MANAGED_CONFIG_UPDATE_MASK_PATHS
 
     def test_update_mask_covers_every_field_the_manifest_can_set(self):
         # A path ucode omits is a field a re-run silently cannot clear, since the server merges per
@@ -3182,7 +2970,7 @@ class TestCodingAgentConfigCrudClients:
                 }
             )
         )
-        assert set(db_mod.MANAGED_CONFIG_UPDATE_MASK_PATHS) == emitted | {"spec_version"}
+        assert set(db_mod.MANAGED_CONFIG_UPDATE_MASK_PATHS) == emitted
 
     def test_delete_returns_only_a_reason(self, monkeypatch):
         seen = {}
@@ -3458,73 +3246,6 @@ class TestListWorkspaceBudgets:
         budgets, _ = list_workspace_budgets("https://ws", "token")
         assert budgets[0]["has_per_user_block"] is True
         assert budgets[0]["per_user_threshold"] is None
-
-
-class TestDiscoverSqlWarehouses:
-    def _payload(self, *entries: dict) -> dict:
-        return {"warehouses": list(entries)}
-
-    def test_explicit_id_skips_discovery(self, monkeypatch):
-        def fail(*a, **k):
-            raise AssertionError("discovery should not be called")
-
-        monkeypatch.setattr(db_mod.urllib_request, "urlopen", fail)
-        assert discover_sql_warehouses(WS, "token", warehouse_id="abc") == [
-            db_mod.SqlWarehouse("/sql/1.0/warehouses/abc", "abc", "REQUESTED")
-        ]
-
-    def test_running_sorted_before_stopped(self, monkeypatch):
-        payload = self._payload(
-            {"id": "s1", "name": "stopped", "state": "STOPPED"},
-            {"id": "r1", "name": "running", "state": "RUNNING"},
-        )
-        monkeypatch.setattr(
-            db_mod.urllib_request, "urlopen", lambda *a, **k: _FakeResponse(payload)
-        )
-        result = discover_sql_warehouses(WS, "token")
-        assert [w.label for w in result] == ["running", "stopped"]
-
-    def test_returns_all_candidates(self, monkeypatch):
-        payload = self._payload(
-            {"id": "a", "name": "A", "state": "RUNNING"},
-            {"id": "b", "name": "B", "state": "RUNNING"},
-        )
-        monkeypatch.setattr(
-            db_mod.urllib_request, "urlopen", lambda *a, **k: _FakeResponse(payload)
-        )
-        assert len(discover_sql_warehouses(WS, "token")) == 2
-
-    def test_skips_entries_without_id(self, monkeypatch):
-        payload = self._payload(
-            {"name": "no id", "state": "RUNNING"},
-            {"id": "b", "name": "B", "state": "RUNNING"},
-        )
-        monkeypatch.setattr(
-            db_mod.urllib_request, "urlopen", lambda *a, **k: _FakeResponse(payload)
-        )
-        assert [w.label for w in discover_sql_warehouses(WS, "token")] == ["B"]
-
-    def test_falls_back_to_id_as_label(self, monkeypatch):
-        payload = self._payload({"id": "abc", "state": "RUNNING"})
-        monkeypatch.setattr(
-            db_mod.urllib_request, "urlopen", lambda *a, **k: _FakeResponse(payload)
-        )
-        assert discover_sql_warehouses(WS, "token")[0].label == "abc"
-
-    def test_empty_list_raises_with_flag_hint(self, monkeypatch):
-        monkeypatch.setattr(
-            db_mod.urllib_request, "urlopen", lambda *a, **k: _FakeResponse({"warehouses": []})
-        )
-        with pytest.raises(RuntimeError, match="--warehouse-id"):
-            discover_sql_warehouses(WS, "token")
-
-    def test_only_unusable_entries_raises(self, monkeypatch):
-        payload = self._payload({"name": "no id", "state": "RUNNING"})
-        monkeypatch.setattr(
-            db_mod.urllib_request, "urlopen", lambda *a, **k: _FakeResponse(payload)
-        )
-        with pytest.raises(RuntimeError, match="No usable SQL warehouse"):
-            discover_sql_warehouses(WS, "token")
 
 
 class TestAllUsersCanUseSchema:

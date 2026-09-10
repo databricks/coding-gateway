@@ -122,6 +122,58 @@ class TestLaunchCodex:
 
         assert calls[0]["start_model"] == "gpt-5.6-luna"
 
+    def test_codex_app_server_uses_requested_listener_instead_of_smart_routing_stack(
+        self, monkeypatch
+    ):
+        prepared = []
+        launches = []
+        monkeypatch.setenv(v2.ENV_VAR, "1")
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.148.0")
+        monkeypatch.setattr(codex, "clear_model_preferences", lambda state: False)
+        monkeypatch.setattr(codex, "default_model", lambda state: "gpt-start")
+        monkeypatch.setattr(
+            v2,
+            "launch_codex",
+            lambda *args, **kwargs: pytest.fail("app-server entered the managed TUI stack"),
+        )
+
+        def prepare(state, **kwargs):
+            prepared.append((state, kwargs))
+            return ["--config", 'model_provider="ucode-databricks"'], []
+
+        monkeypatch.setattr(v2, "prepare_codex_routing", prepare)
+        monkeypatch.setattr(codex, "exec_or_spawn", lambda argv: launches.append(argv))
+        state = {"workspace": WS}
+        requested_args = [
+            "app-server",
+            "--listen",
+            "ws://127.0.0.1:7107",
+            "-c",
+            "mcp_servers.openui.enabled=true",
+        ]
+
+        codex.launch(
+            state,
+            requested_args,
+            options=LaunchOptions(launch_smart_routing=True),
+        )
+
+        assert prepared == [
+            (
+                state,
+                {"start_model": "gpt-start", "render_overlay": codex.render_overlay},
+            )
+        ]
+        assert launches == [
+            [
+                "codex",
+                "app-server",
+                "--config",
+                'model_provider="ucode-databricks"',
+                *requested_args[1:],
+            ]
+        ]
+
     def test_owns_app_server_interposer_and_tui_lifecycle(self, monkeypatch):
         processes = []
         interposer_args = {}
@@ -227,6 +279,71 @@ class TestLaunchCodex:
         assert interposer_args["kwargs"]["switch_message_fn"] is v2.format_routing_notice
         assert stopped == [True]
         assert processes[0].terminated is True
+
+    def test_reuses_external_app_server_and_starts_only_interposer_and_tui(self, monkeypatch):
+        processes = []
+        interposer_targets = []
+        stopped = []
+        external_url = "ws://127.0.0.1:7107"
+
+        class FakeProcess:
+            def __init__(self, argv, **kwargs):
+                self.argv = argv
+                self.kwargs = kwargs
+                processes.append(self)
+
+            def wait(self, timeout=None):
+                assert timeout is None
+                return 9
+
+            def send_signal(self, _signal):
+                raise AssertionError("test does not interrupt the TUI")
+
+        monkeypatch.setattr(v2.subprocess, "Popen", FakeProcess)
+        monkeypatch.setattr(v2, "get_databricks_token", lambda workspace, profile: "token")
+        monkeypatch.setattr(
+            v2,
+            "_free_port",
+            lambda: pytest.fail("external remote must not allocate an app-server port"),
+        )
+        monkeypatch.setattr(
+            v2,
+            "_wait_for_app_server",
+            lambda *args, **kwargs: pytest.fail("external app-server is owned by the caller"),
+        )
+
+        def start_interposer(host, target, **kwargs):
+            interposer_targets.append((host, target, kwargs))
+            return 41002, lambda: stopped.append(True)
+
+        monkeypatch.setattr(codex_interposer, "start_interposer_thread", start_interposer)
+
+        with pytest.raises(SystemExit) as exc:
+            v2.launch_codex(
+                {"workspace": WS, "codex_models": ["system.ai.gpt-5-6-sol"]},
+                ["--remote", external_url, "--search", "--", "keep the prompt intact"],
+                binary="codex",
+                start_model="gpt-start",
+                render_overlay=codex.render_overlay,
+            )
+
+        assert exc.value.code == 9
+        assert len(processes) == 1
+        assert processes[0].argv == [
+            "codex",
+            "--remote",
+            "ws://127.0.0.1:41002",
+            "--model",
+            "gpt-start",
+            "--search",
+            "--",
+            "keep the prompt intact",
+        ]
+        assert (
+            sum(arg == "--remote" or arg.startswith("--remote=") for arg in processes[0].argv) == 1
+        )
+        assert interposer_targets[0][0:2] == (v2.LOOPBACK_HOST, external_url)
+        assert stopped == [True]
 
     def test_v2_pre_tool_hook_preserves_user_hooks(self, tmp_path, monkeypatch):
         codex_home = tmp_path / ".codex"

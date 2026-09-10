@@ -1924,6 +1924,11 @@ def _should_launch_smart_routing(
 ) -> bool:
     if model is not None or has_explicit_model_arg(tool_args):
         return False
+    if tool == "codex" and (
+        tool_args[:1] == ["app-server"]
+        or any(arg == "--remote" or arg.startswith("--remote=") for arg in tool_args)
+    ):
+        return True
     if not tool_args or explicit_prompt:
         return True
     return tool == "claude" and tool_args[0].startswith("-")

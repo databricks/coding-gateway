@@ -486,14 +486,13 @@ def _v2_pre_tool_use_hooks(state: dict, available_models: list[str]) -> list[dic
     )
 
 
-def launch_codex(
+def prepare_codex_routing(
     state: dict,
-    tool_args: list[str],
     *,
-    binary: str,
-    start_model: str | None,
+    start_model: str,
     render_overlay: Callable[..., dict],
-) -> NoReturn:
+) -> tuple[list[str], list[str]]:
+    """Prepare the CLI config and model catalog shared by Codex routing modes."""
     workspace = state.get("workspace")
     if not workspace:
         raise RuntimeError(
@@ -521,25 +520,76 @@ def launch_codex(
     overlay["hooks"] = {
         "PreToolUse": _v2_pre_tool_use_hooks(state, available_models),
     }
-    config_args = codex_config_args(overlay)
-    app_port = _free_port()
-    app_server_url = _loopback_websocket_url(app_port)
+    return codex_config_args(overlay), available_models
 
-    # Preserve the user's normal CODEX_HOME (including MCP servers, skills, and
-    # preferences) and layer only ucode's gateway settings at CLI precedence.
-    app_server = subprocess.Popen(
-        [binary, "app-server", *config_args, "--listen", app_server_url],
-        env=os.environ.copy(),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+
+def _take_remote_arg(tool_args: list[str]) -> tuple[str | None, list[str]]:
+    """Remove Codex's remote option while preserving all other argument ordering."""
+    remote_url = None
+    remaining: list[str] = []
+    index = 0
+    while index < len(tool_args):
+        arg = tool_args[index]
+        if arg == "--":
+            remaining.extend(tool_args[index:])
+            break
+        if arg == "--remote" and index + 1 < len(tool_args) and tool_args[index + 1] != "--":
+            remote_url = tool_args[index + 1]
+            index += 2
+            continue
+        if arg.startswith("--remote="):
+            remote_url = arg.partition("=")[2]
+            index += 1
+            continue
+        remaining.append(arg)
+        index += 1
+    return remote_url, remaining
+
+
+def launch_codex(
+    state: dict,
+    tool_args: list[str],
+    *,
+    binary: str,
+    start_model: str,
+    render_overlay: Callable[..., dict],
+) -> NoReturn:
+    workspace = state.get("workspace")
+    if not isinstance(workspace, str) or not workspace:
+        raise RuntimeError(
+            "Smart routing v2 needs a configured workspace; run `ucode configure codex` first."
+        )
+    profile = state.get("profile")
+    config_args, available_models = prepare_codex_routing(
+        state,
+        start_model=start_model,
+        render_overlay=render_overlay,
     )
+    external_app_server_url, tui_args = _take_remote_arg(tool_args)
+
+    # With no caller-owned remote, preserve the user's normal CODEX_HOME
+    # (including MCP servers, skills, and preferences) and layer only ucode's
+    # gateway settings at CLI precedence on the app-server we create.
+    app_server = None
     stop_interposer = None
     try:
-        if not _wait_for_app_server(app_port, timeout=APP_SERVER_READY_TIMEOUT_SECONDS):
-            raise RuntimeError(
-                "Codex app-server did not become ready for smart routing v2; check workspace auth."
+        if external_app_server_url:
+            app_server_url = external_app_server_url
+        else:
+            app_port = _free_port()
+            app_server_url = _loopback_websocket_url(app_port)
+            app_server = subprocess.Popen(
+                [binary, "app-server", *config_args, "--listen", app_server_url],
+                env=os.environ.copy(),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
+            if not _wait_for_app_server(app_port, timeout=APP_SERVER_READY_TIMEOUT_SECONDS):
+                raise RuntimeError(
+                    "Codex app-server did not become ready for smart routing v2; "
+                    "check workspace auth."
+                )
         tui_port, stop_interposer = codex_interposer.start_interposer_thread(
             LOOPBACK_HOST,
             app_server_url,
@@ -550,7 +600,7 @@ def launch_codex(
             log_path=CODEX_INTERPOSER_LOG,
         )
         tui_url = _loopback_websocket_url(tui_port)
-        tui = subprocess.Popen([binary, "--remote", tui_url, "--model", start_model, *tool_args])
+        tui = subprocess.Popen([binary, "--remote", tui_url, "--model", start_model, *tui_args])
         try:
             returncode = tui.wait()
         except KeyboardInterrupt:
@@ -559,9 +609,10 @@ def launch_codex(
     finally:
         if stop_interposer is not None:
             stop_interposer()
-        app_server.terminate()
-        try:
-            app_server.wait(timeout=PROCESS_SHUTDOWN_TIMEOUT_SECONDS)
-        except Exception:  # noqa: BLE001
-            app_server.kill()
+        if app_server is not None:
+            app_server.terminate()
+            try:
+                app_server.wait(timeout=PROCESS_SHUTDOWN_TIMEOUT_SECONDS)
+            except Exception:  # noqa: BLE001
+                app_server.kill()
     sys.exit(returncode)

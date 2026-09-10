@@ -1685,8 +1685,18 @@ def claude_router_hook_cmd(
         sys.stdout.write(json.dumps(output))
 
 
-def _auto_configure_tool(tool: str, custom_oauth: CustomOAuthConfig | None = None) -> None:
-    """First-time setup for a single tool — mirrors configure_workspace_command."""
+def _auto_configure_tool(
+    tool: str,
+    custom_oauth: CustomOAuthConfig | None = None,
+    model: str | None = None,
+) -> None:
+    """First-time setup for a single tool — mirrors configure_workspace_command.
+
+    ``model`` is an explicit --model request (currently only threaded for copilot): without it,
+    a first-time `ucode copilot --model X` would auto-configure and validate against the
+    automatic sonnet/opus/haiku/codex default instead of X, so a bad automatic pick could fail
+    validation and abort the launch before X is ever tried.
+    """
     existing = load_state()
     workspace = existing.get("workspace")
     profile = existing.get("profile")
@@ -1695,7 +1705,7 @@ def _auto_configure_tool(tool: str, custom_oauth: CustomOAuthConfig | None = Non
     configure_kwargs = {"custom_oauth": custom_oauth} if custom_oauth is not None else {}
     state = configure_shared_state(workspace, profile=profile, tools=[tool], **configure_kwargs)
 
-    state = configure_single_tool(tool, state)
+    state = configure_single_tool(tool, state, explicit_model=model)
 
     spec = TOOL_SPECS[tool]
     console.print(
@@ -1710,7 +1720,7 @@ def _auto_configure_tool(tool: str, custom_oauth: CustomOAuthConfig | None = Non
     )
 
     with spinner(f"Validating {spec['display']}..."):
-        ok, err = validate_tool(tool)
+        ok, err = validate_tool(tool, model=model)
     if ok:
         print_success(f"{spec['display']} is working")
     else:
@@ -1934,9 +1944,11 @@ def _launch_options(
     explicit_prompt: bool,
     model: str | None,
     provider: str | None,
+    settled_model: str | None = None,
 ) -> LaunchOptions:
     return LaunchOptions(
         claude_launch_model=model if tool == "claude" and provider is None else None,
+        copilot_launch_model=settled_model if tool == "copilot" else None,
         launch_smart_routing=(
             # Smart routing is enabled globally.
             smart_routing_enabled
@@ -1995,10 +2007,11 @@ def _launch_tool(
         )
         ensure_bootstrap_dependencies(tool, update_existing=needs_auto_configure)
         if needs_auto_configure:
+            auto_configure_model = model if tool == "copilot" else None
             if custom_oauth is None:
-                _auto_configure_tool(tool)
+                _auto_configure_tool(tool, model=auto_configure_model)
             else:
-                _auto_configure_tool(tool, custom_oauth=custom_oauth)
+                _auto_configure_tool(tool, custom_oauth=custom_oauth, model=auto_configure_model)
         state = ensure_provider_state(tool)
         # Remembered before the fallback below collapses the two cases: a managed config may not
         # silently override a provider the user typed on the command line (it errors instead).
@@ -2220,6 +2233,11 @@ def _launch_tool(
             explicit_prompt=explicit_prompt,
             model=model or (route_root_model if tool == "claude" else None),
             provider=provider,
+            # The settled model, which absorbs --model, a managed config's default, and any
+            # budget recommendation. Passing the raw --model instead would let a launch without
+            # one re-derive the model on every copilot token refresh and overwrite the config
+            # that configure_tool just wrote.
+            settled_model=resolved_model,
         )
         print_success(f"Starting {TOOL_SPECS[tool]['display']}")
         launch_agent(tool, state, ctx.args, options=launch_options)
@@ -2626,10 +2644,19 @@ def opencode_cmd(
 @app.command("copilot", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
 def copilot_cmd(
     ctx: typer.Context,
+    model: Annotated[
+        str | None,
+        typer.Option(
+            "--model",
+            help="Launch on a specific Databricks model id (e.g. a UC "
+            "`<catalog>.<schema>.<name>`). Outranks the automatic sonnet/opus/haiku/codex "
+            "pick and stays pinned across ucode's automatic token refreshes.",
+        ),
+    ] = None,
     skip_preflight: SkipPreflightOption = False,
 ) -> None:
     """Launch GitHub Copilot CLI via Databricks."""
-    _launch_tool("copilot", ctx, skip_preflight=skip_preflight)
+    _launch_tool("copilot", ctx, model=model, skip_preflight=skip_preflight)
 
 
 @app.command("pi", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})

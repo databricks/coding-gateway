@@ -165,30 +165,35 @@ def write_tool_config(
     return state, token
 
 
-def _refresh_token_once(state: dict, *, force_refresh: bool = False) -> tuple[str, str]:
-    model = default_model(state)
+def _refresh_token_once(
+    state: dict, *, force_refresh: bool = False, model_override: str | None = None
+) -> tuple[str, str]:
+    model = model_override or default_model(state)
     if not model:
         raise RuntimeError("No Copilot model is available on this workspace.")
     _, token = write_tool_config(state, model, force_refresh=force_refresh)
     return model, token
 
 
-def _refresh_forever(state: dict, stop_event: threading.Event) -> None:
+def _refresh_forever(
+    state: dict, stop_event: threading.Event, model_override: str | None = None
+) -> None:
     while not stop_event.wait(TOKEN_REFRESH_INTERVAL_SECONDS):
         try:
-            _refresh_token_once(state, force_refresh=True)
+            _refresh_token_once(state, force_refresh=True, model_override=model_override)
         except RuntimeError:
             continue
 
 
 def launch(state: dict, tool_args: list[str], *, options: LaunchOptions) -> None:
-    model, token = _refresh_token_once(state)
+    model_override = options.copilot_launch_model
+    model, token = _refresh_token_once(state, model_override=model_override)
     env = build_runtime_env(state["workspace"], model, token)
 
     stop_event = threading.Event()
     refresher = threading.Thread(
         target=_refresh_forever,
-        args=(state, stop_event),
+        args=(state, stop_event, model_override),
         daemon=True,
     )
     refresher.start()
@@ -222,12 +227,12 @@ def mcp_config_args() -> list[str]:
     return ["--additional-mcp-config", f"@{COPILOT_MCP_CONFIG_PATH}"]
 
 
-def validate_env(state: dict) -> dict[str, str]:
+def validate_env(state: dict, model_override: str | None = None) -> dict[str, str]:
     """Inject BYOK env vars for the validation subprocess (Copilot doesn't auto-load .env)."""
     workspace = state.get("workspace")
     if not workspace:
         raise RuntimeError("No workspace configured.")
-    model = default_model(state)
+    model = model_override or default_model(state)
     if not model:
         raise RuntimeError("No Copilot model is available on this workspace.")
     token = get_databricks_token(workspace, state.get("profile"))

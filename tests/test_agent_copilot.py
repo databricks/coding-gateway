@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import threading
+
+import pytest
 
 from ucode.agents import copilot
 
@@ -196,6 +199,57 @@ class TestManagedKeys:
             "OAUTH_TOKEN",
         ):
             assert key in copilot.MANAGED_KEYS
+
+
+class TestRefreshTokenOnceModelOverride:
+    def test_model_override_wins_over_default_model(self, monkeypatch):
+        seen: dict = {}
+
+        def fake_write_tool_config(state, model, force_refresh=False):
+            seen["model"] = model
+            return state, "tok"
+
+        monkeypatch.setattr(copilot, "write_tool_config", fake_write_tool_config)
+        state = {"claude_models": {"sonnet": "discovered"}}
+
+        model, token = copilot._refresh_token_once(state, model_override="explicit-model")
+
+        assert model == "explicit-model"
+        assert token == "tok"
+        assert seen["model"] == "explicit-model"
+
+    def test_falls_back_to_default_model_without_override(self, monkeypatch):
+        monkeypatch.setattr(
+            copilot, "write_tool_config", lambda state, model, force_refresh=False: (state, "tok")
+        )
+        state = {"claude_models": {"sonnet": "discovered"}}
+
+        model, _ = copilot._refresh_token_once(state)
+
+        assert model == "discovered"
+
+    def test_raises_when_no_override_and_no_default(self):
+        with pytest.raises(RuntimeError, match="No Copilot model is available"):
+            copilot._refresh_token_once({})
+
+
+class TestRefreshForeverModelOverride:
+    def test_forwards_model_override_to_each_refresh(self, monkeypatch):
+        calls: list[str | None] = []
+
+        def fake_refresh_token_once(state, *, force_refresh=False, model_override=None):
+            calls.append(model_override)
+            if len(calls) >= 2:
+                stop_event.set()
+            return model_override, "tok"
+
+        monkeypatch.setattr(copilot, "_refresh_token_once", fake_refresh_token_once)
+        monkeypatch.setattr(copilot, "TOKEN_REFRESH_INTERVAL_SECONDS", 0)
+
+        stop_event = threading.Event()
+        copilot._refresh_forever({}, stop_event, model_override="pinned-model")
+
+        assert calls == ["pinned-model", "pinned-model"]
 
 
 class TestValidateCmd:

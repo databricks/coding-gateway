@@ -516,8 +516,15 @@ def _availability_failure_detail(tool: str, state: dict) -> str:
     return " (" + "; ".join(parts) + ")"
 
 
-def configure_single_tool(tool: str, state: dict) -> dict:
-    """Check availability, configure, and persist state for one tool only."""
+def configure_single_tool(tool: str, state: dict, explicit_model: str | None = None) -> dict:
+    """Check availability, configure, and persist state for one tool only.
+
+    ``explicit_model`` is a caller-requested model (e.g. `ucode copilot --model X` on a
+    first-time configure) that must win over the automatic default pick, so the model written
+    to the config and smoke-tested is X — otherwise a bad automatic pick can fail validation
+    before X is ever tried. The availability check above is model-independent
+    (``check_gateway_endpoint``), so it still gates on discovery finding any model at all.
+    """
     provider = get_provider_service(state, tool)
     # A Model Provider Service routes through the same gateway and pins no
     # Databricks model, so the per-tool model availability check doesn't apply.
@@ -530,14 +537,16 @@ def configure_single_tool(tool: str, state: dict) -> dict:
                 f"{TOOL_SPECS[tool]['display']} is not available on this workspace.{detail}"
             )
     with managed_write_batch(_managed_settings_displays([tool])):
-        state = _configure_one(tool, state, provider)
+        state = _configure_one(tool, state, provider, explicit_model=explicit_model)
     available_tools = list(set((state.get("available_tools") or []) + [tool]))
     state["available_tools"] = available_tools
     save_state(state)
     return state
 
 
-def _configure_one(tool: str, state: dict, provider: str | None) -> dict:
+def _configure_one(
+    tool: str, state: dict, provider: str | None, explicit_model: str | None = None
+) -> dict:
     """Write one tool's config, routing through ``provider`` when set."""
     if provider:
         if tool == "gemini":
@@ -556,7 +565,7 @@ def _configure_one(tool: str, state: dict, provider: str | None) -> dict:
         )
     if tool == "codex":
         return configure_tool("codex", state)
-    state, model = resolve_launch_model(tool, state, None)
+    state, model = resolve_launch_model(tool, state, explicit_model)
     return configure_tool(tool, state, model)
 
 
@@ -625,8 +634,14 @@ def ensure_provider_state(tool: str) -> dict:
     return state
 
 
-def validate_tool(tool: str) -> tuple[bool, str]:
-    """Invoke a tool with a simple prompt to verify it works. Returns (ok, error_msg)."""
+def validate_tool(tool: str, model: str | None = None) -> tuple[bool, str]:
+    """Invoke a tool with a simple prompt to verify it works. Returns (ok, error_msg).
+
+    ``model`` is an explicit --model request (currently only honored for copilot): without it,
+    validation would smoke-test the automatic default pick instead of the model the caller
+    actually asked for, so a bad automatic pick could fail validation before the requested
+    model is ever tried.
+    """
     spec = TOOL_SPECS[tool]
     binary = spec["binary"]
     module = _MODULES[tool]
@@ -638,7 +653,13 @@ def validate_tool(tool: str) -> tuple[bool, str]:
     env = None
     if hasattr(module, "validate_env"):
         try:
-            env = module.validate_env(load_state())
+            # `copilot.validate_env` is the only variant accepting `model_override`; reference
+            # it directly rather than through the union-typed `module` so the extra kwarg
+            # type-checks (ty can't narrow `module`'s type from the `tool == "copilot"` check).
+            if tool == "copilot":
+                env = copilot.validate_env(load_state(), model_override=model)
+            else:
+                env = module.validate_env(load_state())
         except RuntimeError:
             env = None
     try:

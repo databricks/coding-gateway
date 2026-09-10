@@ -34,8 +34,6 @@ from ucode.databricks import (
     get_databricks_token,
     install_ai_tools,
     list_databricks_apps,
-    list_databricks_connections,
-    list_genie_spaces,
     list_workspace_budgets,
     resolve_current_budget_spend,
     upgrade_databricks_cli,
@@ -1784,120 +1782,6 @@ class TestGetDatabricksProfiles:
     def test_returns_empty_on_non_zero_exit(self, monkeypatch):
         self._patched_run(monkeypatch, {"profiles": []}, returncode=1)
         assert get_databricks_profiles() == []
-
-
-class TestListDatabricksConnections:
-    def test_lists_paginated_connections_with_workspace_env(self, monkeypatch):
-        calls: list[dict] = []
-
-        def fake_run(args, **kwargs):
-            calls.append({"args": args, "kwargs": kwargs})
-            if "--page-token" in args:
-                payload = {"connections": [{"name": "jira-mcp", "connection_type": "HTTP"}]}
-            else:
-                payload = {
-                    "connections": [{"name": "confluence-mcp", "connection_type": "HTTP"}],
-                    "next_page_token": "next-page",
-                }
-            return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload))
-
-        monkeypatch.setattr(db_mod, "run", fake_run)
-
-        assert list_databricks_connections(WS) == [
-            {"name": "confluence-mcp", "connection_type": "HTTP"},
-            {"name": "jira-mcp", "connection_type": "HTTP"},
-        ]
-        assert calls[0]["args"] == [
-            "databricks",
-            "connections",
-            "list",
-            "--max-results",
-            "0",
-            "--output",
-            "json",
-        ]
-        assert calls[0]["kwargs"]["env"]["DATABRICKS_HOST"] == WS
-        assert calls[1]["args"][-2:] == ["--page-token", "next-page"]
-
-    def test_passes_profile_when_provided(self, monkeypatch):
-        calls: list[list[str]] = []
-
-        def fake_run(args, **kwargs):
-            calls.append(args)
-            return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"connections": []}))
-
-        monkeypatch.setattr(db_mod, "run", fake_run)
-
-        list_databricks_connections(WS, "my-profile")
-
-        assert "--profile" in calls[0]
-        assert calls[0][calls[0].index("--profile") + 1] == "my-profile"
-
-    def test_raises_on_invalid_json(self, monkeypatch):
-        def fake_run(args, **kwargs):
-            return subprocess.CompletedProcess(args, 0, stdout="not-json")
-
-        monkeypatch.setattr(db_mod, "run", fake_run)
-
-        with pytest.raises(RuntimeError, match="invalid JSON"):
-            list_databricks_connections(WS)
-
-
-class TestListGenieSpaces:
-    def test_lists_paginated_spaces_with_workspace_env(self, monkeypatch):
-        calls: list[dict] = []
-
-        def fake_run(args, **kwargs):
-            calls.append({"args": args, "kwargs": kwargs})
-            if "--page-token" in args:
-                payload = {"spaces": [{"space_id": "space-2", "title": "Second"}]}
-            else:
-                payload = {
-                    "spaces": [{"space_id": "space-1", "title": "First"}],
-                    "next_page_token": "next-page",
-                }
-            return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload))
-
-        monkeypatch.setattr(db_mod, "run", fake_run)
-
-        assert list_genie_spaces(WS) == [
-            {"space_id": "space-1", "title": "First"},
-            {"space_id": "space-2", "title": "Second"},
-        ]
-        assert calls[0]["args"] == [
-            "databricks",
-            "genie",
-            "list-spaces",
-            "--page-size",
-            "100",
-            "--output",
-            "json",
-        ]
-        assert calls[0]["kwargs"]["env"]["DATABRICKS_HOST"] == WS
-        assert calls[1]["args"][-2:] == ["--page-token", "next-page"]
-
-    def test_passes_profile_when_provided(self, monkeypatch):
-        calls: list[list[str]] = []
-
-        def fake_run(args, **kwargs):
-            calls.append(args)
-            return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"spaces": []}))
-
-        monkeypatch.setattr(db_mod, "run", fake_run)
-
-        list_genie_spaces(WS, "my-profile")
-
-        assert "--profile" in calls[0]
-        assert calls[0][calls[0].index("--profile") + 1] == "my-profile"
-
-    def test_raises_on_invalid_json(self, monkeypatch):
-        def fake_run(args, **kwargs):
-            return subprocess.CompletedProcess(args, 0, stdout="not-json")
-
-        monkeypatch.setattr(db_mod, "run", fake_run)
-
-        with pytest.raises(RuntimeError, match="invalid JSON"):
-            list_genie_spaces(WS)
 
 
 class TestListDatabricksApps:

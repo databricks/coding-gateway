@@ -26,7 +26,6 @@ from ucode.databricks import (
     build_shared_base_urls,
     build_tool_base_url,
     discover_model_services,
-    discover_sql_warehouses,
     fetch_ai_gateway_claude_models,
     fetch_codex_models,
     fetch_gemini_models,
@@ -250,21 +249,6 @@ class TestStateRoundTrip:
         assert loaded["workspace"] == e2e_workspace
         assert loaded["claude_models"] == e2e_state["claude_models"]
         assert loaded["base_urls"]["codex"] == f"{e2e_workspace}/ai-gateway/codex/v1"
-
-
-# ---------------------------------------------------------------------------
-# SQL warehouse discovery
-# ---------------------------------------------------------------------------
-
-
-class TestSqlWarehouseDiscovery:
-    def test_discovers_http_path(self, e2e_workspace, e2e_token):
-        try:
-            candidates = discover_sql_warehouses(e2e_workspace, e2e_token)
-        except RuntimeError as exc:
-            pytest.skip(f"No SQL warehouse available: {exc}")
-        assert candidates
-        assert all(w.http_path.startswith("/sql/1.0/warehouses/") for w in candidates)
 
 
 # ---------------------------------------------------------------------------

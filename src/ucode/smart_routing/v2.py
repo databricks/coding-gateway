@@ -19,6 +19,7 @@ from ucode.codex_config import codex_config_args
 from ucode.config_io import APP_DIR, read_json_safe, read_toml_safe, write_json_file
 from ucode.constants import LOOPBACK_HOST
 from ucode.databricks import (
+    AnthropicModelCatalog,
     build_auth_token_argv,
     get_databricks_token,
     list_anthropic_model_catalog,
@@ -56,6 +57,47 @@ CLAUDE_ROUTED_AGENT_PROMPT = (
 # needed because Anthropic omits models from its catalog unless the model id contains "anthropic"
 # or "claude".
 _ANTHROPIC_AIGW_MODEL_RE = re.compile(r"^anthropic-aigw-[0-9a-fA-F]{8}-(.+)$")
+
+
+def _model_picker_catalog() -> AnthropicModelCatalog | None:
+    """Read model-picker rows using the managed-settings then ucode-settings waterfall.
+
+    A managed picker is authoritative for smart routing: its rows are the models the
+    administrator exposed, so there is no need to query the gateway catalog first.
+    """
+    try:
+        from ucode.agents.claude import (
+            CLAUDE_SETTINGS_PATH,
+            CLAUDE_USER_SETTINGS_PATH,
+            _managed_settings_path,
+        )
+
+        # Hierarchy: managed settings, CLI-supplied settings (ucode-settings.json), local user
+        # settings, based on the modelPicker scope documented at https://code.claude.com/docs/en/settings-reference#modelpicker.
+        paths = [_managed_settings_path(), CLAUDE_SETTINGS_PATH, CLAUDE_USER_SETTINGS_PATH]
+    except (ImportError, OSError):
+        return None
+    for path in paths:
+        if path is None or not path.is_file():
+            continue
+        settings = read_json_safe(path)
+        picker_settings = settings.get("modelPicker") if isinstance(settings, dict) else None
+        picker = picker_settings.get("options") if isinstance(picker_settings, dict) else None
+        if not isinstance(picker, list):
+            continue
+        model_ids: list[str] = []
+        seen: set[str] = set()
+        for row in picker:
+            if not isinstance(row, dict) or not isinstance(row.get("model"), str):
+                continue
+            model_id = row["model"].strip()
+            if not model_id or model_id in seen:
+                continue
+            seen.add(model_id)
+            model_ids.append(model_id)
+        if model_ids:
+            return AnthropicModelCatalog(model_ids, {})
+    return None
 
 
 def enabled() -> bool:
@@ -113,11 +155,16 @@ def _canonical_claude_models(model_ids: list[str]) -> list[str]:
     )
 
 
+def _unwrapped_claude_model_id(model: str) -> str:
+    """Strip the Anthropic gateway wrapper, preserving the embedded model id."""
+    if match := _ANTHROPIC_AIGW_MODEL_RE.fullmatch(model):
+        return match.group(1)
+    return model
+
+
 def _claude_router_model_id(model: str) -> str:
     """Unwrap an Anthropic gateway id, then apply standard model normalization."""
-    if match := _ANTHROPIC_AIGW_MODEL_RE.fullmatch(model):
-        model = match.group(1)
-    return routing.normalize_model(model)
+    return routing.normalize_model(_unwrapped_claude_model_id(model))
 
 
 def _claude_model_overrides(model_ids: list[str]) -> dict[str, str]:
@@ -204,7 +251,7 @@ def _request_claude_routing_decision(
         token,
         prompt,
         route_options,
-        lambda selected: available.get(routing.normalize_model(selected)),
+        lambda selected: available.get(_claude_router_model_id(selected)),
         router_name=routing.configured_router_name(),
         timeout=CLAUDE_ROUTE_SELECTION_TIMEOUT_S,
     )
@@ -348,7 +395,8 @@ def launch_claude(
     os.environ[OAUTH_TOKEN_ENV_VAR] = token
     os.environ[GATEWAY_MODEL_DISCOVERY_ENV_VAR] = "1"
     os.environ["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
-    catalog = list_anthropic_model_catalog(workspace, token)
+    # modelPicker takes priority over model discovery.
+    catalog = _model_picker_catalog() or list_anthropic_model_catalog(workspace, token)
     if not catalog.model_ids:
         raise RuntimeError(
             catalog.error_msg or "Anthropic models endpoint returned no Claude models"
@@ -388,7 +436,7 @@ def launch_claude(
     def route_prompt(prompt: str) -> claude_pty.FirstPromptRoute:
         decision = _route_claude_prompt(state, token, prompt, model_ids)
         return claude_pty.FirstPromptRoute(
-            model=model_name(decision.model),
+            model=model_name(_unwrapped_claude_model_id(decision.model)),
             display_model=catalog.model_id_to_display_name.get(decision.model, decision.model),
             rationale=decision.rationale,
         )

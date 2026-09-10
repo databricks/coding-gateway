@@ -117,6 +117,14 @@ class TestHelp:
         assert "comma-separated list of agents" in flat
         assert "--workspaces" in output
 
+    def test_usage_help_is_budget_only(self):
+        result = runner.invoke(app, ["usage", "--help"])
+        output = _strip_ansi(result.output)
+
+        assert result.exit_code == 0
+        assert "dollars spent and total budget" in output
+        assert "--warehouse-id" not in output
+
 
 class TestProjectScripts:
     def test_ug_and_ucode_are_equivalent_entry_points(self):
@@ -2371,6 +2379,7 @@ class TestConfigureAgentsSelection:
             use_pat=False,
             fable_enabled=None,
             databricks_ai_tools_enabled=None,
+            clear_custom_oauth=False,
         ):
             captured["workspace"] = workspace
             captured["profile"] = profile
@@ -2409,6 +2418,7 @@ class TestConfigureAgentsSelection:
             use_pat=False,
             fable_enabled=None,
             databricks_ai_tools_enabled=None,
+            clear_custom_oauth=False,
         ):
             configured_shared.append(
                 (workspace, profile, tuple(tools) if tools is not None else None, force_login)

@@ -17,6 +17,12 @@ GitHub Copilot CLI, and Pi through Databricks.
 uv tool install git+https://github.com/databricks/unity-gateway
 ```
 
+To enable the optional custom-client OAuth flow, install the `custom-oauth` extra:
+
+```bash
+uv tool install "ucode[custom-oauth] @ git+https://github.com/databricks/unity-gateway"
+```
+
 Check your version with `ug --version`. Between releases this looks like
 `0.1.0+14.g93986a8` — the trailing `g<hash>` is the exact commit the build came
 from, so include it when reporting a bug.
@@ -113,14 +119,25 @@ ug configure mcp
 ```
 
 Add Databricks MCP servers to installed MCP-capable tools: Codex, Claude Code, Gemini CLI, OpenCode, GitHub Copilot CLI, and Cursor Agent.
-Options are shown in this order:
 
-- Discovered external MCP connections
-- Databricks SQL
-- Managed Databricks MCPs (Vector Search, UC Functions, etc.)
-- Custom MCP server URL
+The interactive picker discovers **MCP services** (the `system.ai.*` and workspace-wide
+`<catalog>.<schema>` Unity Catalog MCP services) and a custom MCP server URL.
 
-Discovered external MCP connections are listed directly.
+V2 AI Gateway servers — Vector Search, UC Functions, external connections, Genie spaces, and
+Databricks apps — are **not** offered in the picker, because consumer-only identities can't
+reach the V2 AI Gateway. Workspace users add them non-interactively by naming them in
+`--services` with a typed selector:
+
+```bash
+ug mcp add --services vector-search:main.docs
+ug mcp add --services uc-functions:main.tools
+ug mcp add --services external:my-connection
+ug mcp add --services genie-space:<space-id>
+ug mcp add --services app:my-app
+```
+
+These require workspace access; a consumer-only identity is gated at the AI Gateway (which
+`ug` already hits when it sets up models), not by this command.
 
 Every Databricks MCP server is registered as a local **stdio** server that runs `ug mcp-proxy`
 — a small bridge (shipped with `ug`) between the coding tool and the Databricks
@@ -356,8 +373,7 @@ The output looks like:
 | `ug status` | Show current workspace, base URLs, managed config files, and selected models |
 | `ug export` | Print the workspace's managed config as portable JSON (`--file <file>` / `-f` to write a file) |
 | `ug doctor` | Diagnose local issues (uv, npm, Databricks CLI, workspace, credentials, agent CLIs, tracing) and offer to fix any problems found |
-| `ug usage` | Show AI Gateway usage summary, plus your budget spend against its alert threshold when the workspace reports one |
-| `ug usage --warehouse-id <id>` | Query a specific SQL warehouse instead of discovering one |
+| `ug usage` | Show your AI Gateway dollars spent and total budget |
 | `ug revert` | Clear saved state and restore backed-up config files |
 | `ug configure --dry-run` | Preview config files without writing them |
 | `ug configure --agents claude,codex` | Configure specific agents without the interactive picker |

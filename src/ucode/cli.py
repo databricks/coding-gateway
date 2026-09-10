@@ -9,13 +9,13 @@ import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
 from importlib import metadata
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 from rich.panel import Panel
-from typer._click import Context as ClickContext
 from typer.core import TyperCommand
 
+from ucode import custom_oauth
 from ucode.agents import (
     TOOL_SPECS,
     LaunchOptions,
@@ -148,6 +148,8 @@ from ucode.ui import (
     status_badge,
 )
 from ucode.usage import usage as usage_report
+
+CustomOAuthConfig = custom_oauth.CustomOAuthConfig
 
 _DISCOVERY_CONSUMERS: dict[str, tuple[str, ...]] = {
     "claude": ("claude", "opencode", "copilot", "pi"),
@@ -299,6 +301,25 @@ def _prompt_for_configuration(tool: str | None = None) -> tuple[str, str | None]
     return prompt_for_workspace(desc, profiles)
 
 
+def _custom_oauth_config(
+    client_id: str | None,
+    redirect_url: str | None,
+    scopes: str | None,
+) -> CustomOAuthConfig | None:
+    if client_id is None and redirect_url is None and scopes is None:
+        return None
+    if client_id is None:
+        raise RuntimeError("--redirect-url and --scopes require --client-id.")
+    if scopes is None:
+        raise RuntimeError("--scopes is required with --client-id.")
+
+    return custom_oauth.create_custom_oauth_config(
+        client_id,
+        scopes.split(","),
+        redirect_url or custom_oauth.DEFAULT_REDIRECT_URL,
+    )
+
+
 def _parse_agents_option(agents: str) -> list[str]:
     tools: list[str] = []
     for raw_tool in agents.split(","):
@@ -409,6 +430,8 @@ def configure_shared_state(
     skip_preflight: bool = False,
     fable_enabled: bool | None = None,
     databricks_ai_tools_enabled: bool | None = None,
+    custom_oauth: CustomOAuthConfig | None = None,
+    clear_custom_oauth: bool = False,
 ) -> dict:
     """Log into Databricks, verify AI Gateway, fetch model lists, persist state.
 
@@ -478,6 +501,12 @@ def configure_shared_state(
     else:
         state.pop("fable_enabled", None)
     state["databricks_ai_tools_enabled"] = databricks_ai_tools_enabled
+    if clear_custom_oauth:
+        state.pop("custom_oauth", None)
+    elif custom_oauth is not None:
+        state["custom_oauth"] = dict(custom_oauth)
+    elif previous_workspace != workspace:
+        state.pop("custom_oauth", None)
     state["base_urls"] = build_shared_base_urls(workspace)
 
     if skip_preflight:
@@ -642,11 +671,16 @@ def _configure_shared_workspace_states(
     use_pat: bool = False,
     fable_enabled: bool | None = None,
     databricks_ai_tools_enabled: bool | None = None,
+    custom_oauth: CustomOAuthConfig | None = None,
+    clear_custom_oauth: bool = False,
 ) -> list[dict]:
     if not workspaces:
         raise RuntimeError("At least one workspace must be provided.")
     states: list[dict] = []
     for workspace, profile in workspaces:
+        custom_oauth_kwargs = {"custom_oauth": custom_oauth} if custom_oauth is not None else {}
+        if clear_custom_oauth:
+            custom_oauth_kwargs["clear_custom_oauth"] = True
         states.append(
             configure_shared_state(
                 workspace,
@@ -656,6 +690,7 @@ def _configure_shared_workspace_states(
                 use_pat=use_pat,
                 fable_enabled=fable_enabled,
                 databricks_ai_tools_enabled=databricks_ai_tools_enabled,
+                **custom_oauth_kwargs,
             )
         )
     return states
@@ -738,6 +773,7 @@ def configure_workspace_command(
     skip_unavailable: bool = False,
     fable_enabled: bool | None = None,
     databricks_ai_tools_enabled: bool | None = None,
+    custom_oauth: CustomOAuthConfig | None = None,
     offer_optional_setup: bool = False,
 ) -> int:
     if tool is not None and selected_tools is not None:
@@ -758,6 +794,8 @@ def configure_workspace_command(
             use_pat=use_pat,
             fable_enabled=fable_enabled,
             databricks_ai_tools_enabled=databricks_ai_tools_enabled,
+            custom_oauth=custom_oauth,
+            clear_custom_oauth=custom_oauth is None,
         )
         state = states[0]
         state = configure_single_tool(tool, state)
@@ -797,6 +835,8 @@ def configure_workspace_command(
         use_pat=use_pat,
         fable_enabled=fable_enabled,
         databricks_ai_tools_enabled=databricks_ai_tools_enabled,
+        custom_oauth=custom_oauth,
+        clear_custom_oauth=custom_oauth is None,
     )
     state = states[0]
     save_state(state)
@@ -1126,7 +1166,10 @@ def mcp_add(
             help="Register this comma-separated subset of MCP services (additively). Full names "
             "like `system.ai.github` work on their own; bare short names like `github` need "
             "--location to locate them. Omit --services to register the whole --location schema; "
-            'an empty `--services ""` adds nothing (no-op).',
+            'an empty `--services ""` adds nothing (no-op). V2 AI Gateway servers (not in the '
+            "interactive picker) are added by naming them here: `vector-search:<catalog>.<schema>`, "
+            "`uc-functions:<catalog>.<schema>`, `external:<connection>`, `genie-space:<id>`, or "
+            "`app:<name>` (workspace access required).",
         ),
     ] = None,
     agents: Annotated[
@@ -1375,6 +1418,28 @@ def auth_token_cmd(
         bool,
         typer.Option("--force-refresh", help="Force the Databricks CLI to mint a new token."),
     ] = False,
+    client_id: Annotated[
+        str | None,
+        typer.Option(
+            "--client-id", hidden=True, help="Experimental: custom public OAuth client ID."
+        ),
+    ] = None,
+    redirect_url: Annotated[
+        str | None,
+        typer.Option(
+            "--redirect-url",
+            hidden=True,
+            help="Registered OAuth callback URL. Defaults to http://localhost:8020.",
+        ),
+    ] = None,
+    scopes: Annotated[
+        str | None,
+        typer.Option(
+            "--scopes",
+            hidden=True,
+            help="Comma-separated OAuth scopes for the custom client.",
+        ),
+    ] = None,
 ) -> None:
     """Print a Databricks bearer token to stdout, then exit.
 
@@ -1385,13 +1450,25 @@ def auth_token_cmd(
     binary works on macOS, Linux, and Windows without any POSIX shell."""
     import sys
 
+    if client_id is not None and use_pat:
+        print_err("--client-id cannot be combined with --use-pat.")
+        raise typer.Exit(1)
+    if redirect_url is not None and client_id is None:
+        print_err("--redirect-url requires --client-id.")
+        raise typer.Exit(1)
+    if scopes is not None and client_id is None:
+        print_err("--scopes requires --client-id.")
+        raise typer.Exit(1)
+    if client_id is not None and scopes is None:
+        print_err("--scopes is required with --client-id.")
+        raise typer.Exit(1)
     state = load_state()
     workspace = host or state.get("workspace")
     if not workspace:
         print_err("No workspace configured. Run `ug configure` first.")
         raise typer.Exit(1)
     profile = profile or state.get("profile")
-    if use_pat or state.get("use_pat"):
+    if client_id is None and (use_pat or state.get("use_pat")):
         # --use-pat explicitly means "serve the profile's static PAT". Fail
         # closed if it can't be read rather than falling through to OAuth —
         # `auth token` cannot serve a PAT-only profile, so that path would
@@ -1405,7 +1482,19 @@ def auth_token_cmd(
             )
             raise typer.Exit(1)
     try:
-        token = get_databricks_token(workspace, profile, force_refresh=force_refresh)
+        if client_id is not None:
+            assert scopes is not None
+            token = custom_oauth.get_custom_client_token(
+                workspace,
+                client_id=client_id,
+                redirect_url=(
+                    redirect_url if redirect_url is not None else custom_oauth.DEFAULT_REDIRECT_URL
+                ),
+                scopes=scopes.split(","),
+                force_refresh=force_refresh,
+            )
+        else:
+            token = get_databricks_token(workspace, profile, force_refresh=force_refresh)
     except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None
@@ -1599,14 +1688,15 @@ def claude_router_hook_cmd(
         sys.stdout.write(json.dumps(output))
 
 
-def _auto_configure_tool(tool: str) -> None:
+def _auto_configure_tool(tool: str, custom_oauth: CustomOAuthConfig | None = None) -> None:
     """First-time setup for a single tool — mirrors configure_workspace_command."""
     existing = load_state()
     workspace = existing.get("workspace")
     profile = existing.get("profile")
     if not workspace:
         workspace, profile = _prompt_for_configuration(tool)
-    state = configure_shared_state(workspace, profile=profile, tools=[tool])
+    configure_kwargs = {"custom_oauth": custom_oauth} if custom_oauth is not None else {}
+    state = configure_shared_state(workspace, profile=profile, tools=[tool], **configure_kwargs)
 
     state = configure_single_tool(tool, state)
 
@@ -1878,6 +1968,7 @@ def _launch_tool(
     managed: dict | None = None,
     recommendation: dict | None = None,
     model: str | None = None,
+    custom_oauth: CustomOAuthConfig | None = None,
 ) -> None:
     try:
         tool = normalize_tool(tool_name)
@@ -1907,7 +1998,10 @@ def _launch_tool(
         )
         ensure_bootstrap_dependencies(tool, update_existing=needs_auto_configure)
         if needs_auto_configure:
-            _auto_configure_tool(tool)
+            if custom_oauth is None:
+                _auto_configure_tool(tool)
+            else:
+                _auto_configure_tool(tool, custom_oauth=custom_oauth)
         state = ensure_provider_state(tool)
         # Remembered before the fallback below collapses the two cases: a managed config may not
         # silently override a provider the user typed on the command line (it errors instead).
@@ -1932,12 +2026,14 @@ def _launch_tool(
         # tools like pi which read multiple model bundles never run on
         # stale state from before a tool added a new bundle). Under a provider
         # this heavy discovery is skipped (only a web-search model is fetched).
+        configure_kwargs = {"custom_oauth": custom_oauth} if custom_oauth is not None else {}
         state = configure_shared_state(
             state["workspace"],
             profile=state.get("profile"),
             tools=[tool],
             skip_model_discovery=bool(provider) or managed_models_known,
             skip_preflight=skip_preflight,
+            **configure_kwargs,
         )
         # An admin-published managed config wins over the developer's own settings. Layered on after
         # `configure_shared_state`, whose returned state it overrides, and before the provider and
@@ -2174,7 +2270,7 @@ _PROMPT_SUFFIX_KEY = "ucode_explicit_prompt_suffix"
 class _PromptAwareCommand(TyperCommand):
     """Record an agent's ``--`` prompt separator before Click removes it."""
 
-    def parse_args(self, ctx: ClickContext, args: list[str]) -> list[str]:
+    def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
         try:
             separator = args.index("--")
         except ValueError:
@@ -2336,6 +2432,20 @@ def codex_cmd(
     ] = False,
     skip_preflight: SkipPreflightOption = False,
     workspace: WorkspaceOption = None,
+    client_id: Annotated[
+        str | None,
+        typer.Option("--client-id", hidden=True, help="Custom OAuth client ID for Codex auth."),
+    ] = None,
+    redirect_url: Annotated[
+        str | None,
+        typer.Option(
+            "--redirect-url", hidden=True, help="Custom OAuth callback URL for Codex auth."
+        ),
+    ] = None,
+    scopes: Annotated[
+        str | None,
+        typer.Option("--scopes", hidden=True, help="Comma-separated custom OAuth scopes."),
+    ] = None,
     enable_smart_routing_flag: Annotated[
         bool,
         typer.Option(
@@ -2353,6 +2463,11 @@ def codex_cmd(
     ] = False,
 ) -> None:
     """Launch Codex via Databricks."""
+    try:
+        custom_oauth = _custom_oauth_config(client_id, redirect_url, scopes)
+    except RuntimeError as exc:
+        print_err(str(exc))
+        raise typer.Exit(1) from exc
     if enable_smart_routing_flag and disable_smart_routing_flag:
         print_err("Use only one of --enable-smart-routing or --disable-smart-routing.")
         raise typer.Exit(1)
@@ -2368,6 +2483,7 @@ def codex_cmd(
             refresh=refresh,
             skip_preflight=skip_preflight,
             workspace_url=workspace,
+            custom_oauth=custom_oauth,
         )
 
 
@@ -2407,6 +2523,20 @@ def claude_cmd(
     ] = False,
     skip_preflight: SkipPreflightOption = False,
     workspace: WorkspaceOption = None,
+    client_id: Annotated[
+        str | None,
+        typer.Option("--client-id", hidden=True, help="Custom OAuth client ID for apiKeyHelper."),
+    ] = None,
+    redirect_url: Annotated[
+        str | None,
+        typer.Option(
+            "--redirect-url", hidden=True, help="Custom OAuth callback URL for apiKeyHelper."
+        ),
+    ] = None,
+    scopes: Annotated[
+        str | None,
+        typer.Option("--scopes", hidden=True, help="Comma-separated custom OAuth scopes."),
+    ] = None,
     enable_model_discovery: Annotated[
         bool,
         typer.Option(
@@ -2432,6 +2562,11 @@ def claude_cmd(
     ] = False,
 ) -> None:
     """Launch Claude Code via Databricks."""
+    try:
+        custom_oauth = _custom_oauth_config(client_id, redirect_url, scopes)
+    except RuntimeError as exc:
+        print_err(str(exc))
+        raise typer.Exit(1) from exc
     if enable_smart_routing_flag and disable_smart_routing_flag:
         print_err("Use only one of --enable-smart-routing or --disable-smart-routing.")
         raise typer.Exit(1)
@@ -2450,6 +2585,7 @@ def claude_cmd(
             refresh=refresh,
             skip_preflight=skip_preflight,
             workspace_url=workspace,
+            custom_oauth=custom_oauth,
         )
 
 
@@ -2588,6 +2724,26 @@ def configure(
             "CI / headless environments.",
         ),
     ] = False,
+    client_id: Annotated[
+        str | None,
+        typer.Option("--client-id", hidden=True, help="Custom OAuth client ID for apiKeyHelper."),
+    ] = None,
+    redirect_url: Annotated[
+        str | None,
+        typer.Option(
+            "--redirect-url",
+            hidden=True,
+            help="Custom OAuth callback URL for apiKeyHelper.",
+        ),
+    ] = None,
+    scopes: Annotated[
+        str | None,
+        typer.Option(
+            "--scopes",
+            hidden=True,
+            help="Comma-separated custom OAuth scopes for apiKeyHelper.",
+        ),
+    ] = None,
     skip_validate: Annotated[
         bool,
         typer.Option(
@@ -2675,6 +2831,9 @@ def configure(
     set_verbosity(verbose)
     prompt_optional_updates = not skip_upgrade
     try:
+        custom_oauth = _custom_oauth_config(client_id, redirect_url, scopes)
+        if custom_oauth is not None and use_pat:
+            raise RuntimeError("--client-id cannot be combined with --use-pat.")
         install_databricks_cli()
         if agent is not None and agents is not None:
             raise RuntimeError("Use either --agent or --agents, not both.")
@@ -2717,6 +2876,8 @@ def configure(
             agent = "claude"
         if enable_databricks_ai_tools is not None:
             skip_kwargs["databricks_ai_tools_enabled"] = enable_databricks_ai_tools
+        if custom_oauth is not None:
+            skip_kwargs["custom_oauth"] = custom_oauth
         # Set True only in the fully-interactive branch below; gates the optional
         # MCP setup prompt so flag-driven / scripted runs are never interrupted.
         fully_interactive = False
@@ -2773,6 +2934,7 @@ def configure(
                     tools=[],
                     force_login=not use_pat,
                     use_pat=use_pat,
+                    custom_oauth=custom_oauth,
                 )
             else:
                 # Neither model agents nor cursor -> empty/invalid --agents list.
@@ -2789,6 +2951,7 @@ def configure(
                 tools=[],
                 force_login=not use_pat,
                 use_pat=use_pat,
+                custom_oauth=custom_oauth,
             )
         else:
             # Tool binaries are installed after the user picks which agents
@@ -2886,7 +3049,10 @@ def configure_mcp(
             "removing to match) instead of a whole schema. Full names like `system.ai.github` "
             "work on their own; bare short names like `github` need --location to locate them. "
             "Omit --services to configure the whole --location schema; pass an empty string "
-            "(with --location) to remove all.",
+            "(with --location) to remove all. V2 AI Gateway servers (not in the interactive "
+            "picker) are named directly: `vector-search:<catalog>.<schema>`, "
+            "`uc-functions:<catalog>.<schema>`, `external:<connection>`, `genie-space:<id>`, or "
+            "`app:<name>` (workspace access required).",
         ),
     ] = None,
 ) -> None:
@@ -3210,16 +3376,11 @@ def doctor_cmd() -> None:
 
 
 @app.command("usage")
-def usage_cmd(
-    warehouse_id: Annotated[
-        str | None,
-        typer.Option("--warehouse-id", help="SQL warehouse to query, instead of discovering one."),
-    ] = None,
-) -> None:
-    """Show Databricks AI Gateway usage summary (last 7 days)."""
+def usage_cmd() -> None:
+    """Show AI Gateway dollars spent and total budget."""
     try:
         install_databricks_cli()
-        usage_report(warehouse_id=warehouse_id)
+        usage_report()
     except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None

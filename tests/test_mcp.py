@@ -231,30 +231,6 @@ class TestRemoveClaudeMcpServer:
             raise AssertionError("expected RuntimeError")
 
 
-class TestExternalMcpConnectionNames:
-    def test_returns_sorted_http_connection_names(self):
-        assert mcp.external_mcp_connection_names(
-            [
-                {"name": "jira-mcp", "connection_type": "HTTP"},
-                {"name": "not-http", "connection_type": "POSTGRESQL"},
-                {"name": "confluence-mcp", "connection_type": "http"},
-                {"name": "jira-mcp", "connection_type": "HTTP"},
-            ]
-        ) == ["confluence-mcp", "jira-mcp"]
-
-    def test_excludes_explicit_non_mcp_http_connections(self):
-        assert mcp.external_mcp_connection_names(
-            [
-                {
-                    "name": "analytics-api",
-                    "connection_type": "HTTP",
-                    "options": {"is_mcp": "false"},
-                },
-                {"name": "github-mcp", "connection_type": "HTTP", "options": {"is_mcp": "true"}},
-            ]
-        ) == ["github-mcp"]
-
-
 class TestCursorMcpClient:
     def test_cursor_registered_as_mcp_only_client(self):
         assert "cursor" in mcp.MCP_CLIENTS
@@ -417,53 +393,6 @@ class TestMcpPicker:
         # show the picker is empty (the caller prints the "nothing selected" hint).
         assert mcp.build_mcp_picker_choices([], [], [], []) == []
 
-    def test_discovers_genie_spaces_as_mcp_servers(self):
-        assert mcp.genie_mcp_servers(
-            [
-                {"space_id": "space-2", "title": "Second Space"},
-                {"space_id": "space-1", "title": "First Space"},
-                {"title": "Missing ID"},
-            ],
-            WS,
-        ) == [
-            {
-                "name": "databricks-genie-first-space",
-                "title": "First Space",
-                "url": f"{WS}/api/2.0/mcp/genie/space-1",
-            },
-            {
-                "name": "databricks-genie-second-space",
-                "title": "Second Space",
-                "url": f"{WS}/api/2.0/mcp/genie/space-2",
-            },
-        ]
-
-    def test_genie_server_name_falls_back_to_space_id_on_slug_collision(self):
-        assert mcp.genie_mcp_servers(
-            [
-                {"space_id": "space-1", "title": "New Space"},
-                {"space_id": "space-2", "title": "new space"},
-                {"space_id": "space-3", "title": ""},
-            ],
-            WS,
-        ) == [
-            {
-                "name": "databricks-genie-new-space",
-                "title": "New Space",
-                "url": f"{WS}/api/2.0/mcp/genie/space-1",
-            },
-            {
-                "name": "databricks-genie-space-2",
-                "title": "new space",
-                "url": f"{WS}/api/2.0/mcp/genie/space-2",
-            },
-            {
-                "name": "databricks-genie-space-3",
-                "title": "space-3",
-                "url": f"{WS}/api/2.0/mcp/genie/space-3",
-            },
-        ]
-
     def test_picker_lists_discovered_genie_spaces(self):
         choices = mcp.build_mcp_picker_choices(
             ["github-mcp"],
@@ -521,71 +450,6 @@ class TestMcpPicker:
         choices_by_title = {choice.title: choice for choice in choices}
         assert choices_by_title["App: mcp-my-app"].value == f"{mcp.MCP_ADD_PREFIX}app:mcp-my-app"
 
-    def test_vector_search_mcp_servers_emit_managed_url_per_pair(self):
-        servers = mcp.vector_search_mcp_servers(
-            [("main", "search"), ("Marketing", "Docs")],
-            WS,
-        )
-        assert servers == [
-            {
-                "name": "databricks-vector-search-main-search",
-                "title": "main.search",
-                "catalog": "main",
-                "schema": "search",
-                "url": f"{WS}/api/2.0/mcp/vector-search/main/search",
-            },
-            {
-                "name": "databricks-vector-search-marketing-docs",
-                "title": "Marketing.Docs",
-                "catalog": "Marketing",
-                "schema": "Docs",
-                "url": f"{WS}/api/2.0/mcp/vector-search/Marketing/Docs",
-            },
-        ]
-
-    def test_uc_functions_mcp_servers_emit_managed_url_per_pair(self):
-        servers = mcp.uc_functions_mcp_servers(
-            [("analytics", "tools"), ("ml", "udfs")],
-            WS,
-        )
-        assert servers == [
-            {
-                "name": "databricks-functions-analytics-tools",
-                "title": "analytics.tools",
-                "catalog": "analytics",
-                "schema": "tools",
-                "url": f"{WS}/api/2.0/mcp/functions/analytics/tools",
-            },
-            {
-                "name": "databricks-functions-ml-udfs",
-                "title": "ml.udfs",
-                "catalog": "ml",
-                "schema": "udfs",
-                "url": f"{WS}/api/2.0/mcp/functions/ml/udfs",
-            },
-        ]
-
-    def test_picker_lists_discovered_vector_search_and_uc_functions(self):
-        choices = mcp.build_mcp_picker_choices(
-            [],
-            [],
-            [],
-            [],
-            available_vector_search_servers=mcp.vector_search_mcp_servers([("main", "search")], WS),
-            available_uc_functions_servers=mcp.uc_functions_mcp_servers(
-                [("analytics", "tools")], WS
-            ),
-        )
-        choices_by_title = {choice.title: choice for choice in choices}
-        assert (
-            choices_by_title["Vector Search: main.search"].value
-            == f"{mcp.MCP_ADD_PREFIX}vector-search:main.search"
-        )
-        assert (
-            choices_by_title["UC Functions: analytics.tools"].value
-            == f"{mcp.MCP_ADD_PREFIX}uc-functions:analytics.tools"
-        )
-
     def test_picker_keeps_saved_legacy_servers_for_removal(self):
         choices = mcp.build_mcp_picker_choices(
             [],
@@ -619,16 +483,6 @@ def _patch_mcp_choices(monkeypatch, *values: str, categories: set[str] | None = 
     monkeypatch.setattr(
         mcp,
         "discover_all_mcp_service_names",
-        lambda workspace, profile=None, on_progress=None: [],
-    )
-    monkeypatch.setattr(
-        mcp,
-        "discover_vector_search_mcp_servers",
-        lambda workspace, profile=None, on_progress=None: [],
-    )
-    monkeypatch.setattr(
-        mcp,
-        "discover_uc_functions_mcp_servers",
         lambda workspace, profile=None, on_progress=None: [],
     )
 
@@ -715,10 +569,6 @@ class TestConfigureMcpCommand:
         monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
         monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace, profile=None: None)
         monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
-        monkeypatch.setattr(
-            mcp, "discover_external_mcp_connection_names", lambda workspace, profile=None: []
-        )
-        monkeypatch.setattr(mcp, "discover_genie_mcp_servers", lambda workspace, profile=None: [])
         monkeypatch.setattr(mcp, "discover_app_mcp_servers", lambda workspace, profile=None: [])
         _patch_mcp_choices(monkeypatch, "github")
         monkeypatch.setattr(mcp, "remove_claude_mcp_server", lambda name, scope: False)
@@ -745,12 +595,6 @@ class TestConfigureMcpCommand:
             "available_mcp_clients",
             lambda: ALL_MCP_CLIENTS,
         )
-        monkeypatch.setattr(
-            mcp,
-            "discover_external_mcp_connection_names",
-            lambda workspace, profile=None: ["confluence-mcp", "github-mcp"],
-        )
-        monkeypatch.setattr(mcp, "discover_genie_mcp_servers", lambda workspace, profile=None: [])
         monkeypatch.setattr(mcp, "discover_app_mcp_servers", lambda workspace, profile=None: [])
         _patch_mcp_choices(monkeypatch, f"{mcp.MCP_ADD_PREFIX}external:github-mcp")
 
@@ -789,20 +633,6 @@ class TestConfigureMcpCommand:
         monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
         monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace, profile=None: None)
         monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
-        monkeypatch.setattr(
-            mcp, "discover_external_mcp_connection_names", lambda workspace, profile=None: []
-        )
-        monkeypatch.setattr(
-            mcp,
-            "discover_genie_mcp_servers",
-            lambda workspace, profile=None: [
-                {
-                    "name": "databricks-genie-space-123",
-                    "title": "Sales Genie",
-                    "url": f"{WS}/api/2.0/mcp/genie/space-123",
-                }
-            ],
-        )
         monkeypatch.setattr(mcp, "discover_app_mcp_servers", lambda workspace, profile=None: [])
         _patch_mcp_choices(
             monkeypatch, f"{mcp.MCP_ADD_PREFIX}genie-space:space-123", categories={"genie"}
@@ -840,22 +670,11 @@ class TestConfigureMcpCommand:
         monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
         monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace, profile=None: None)
         monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
-        monkeypatch.setattr(
-            mcp, "discover_external_mcp_connection_names", lambda workspace, profile=None: []
-        )
-        monkeypatch.setattr(mcp, "discover_genie_mcp_servers", lambda workspace, profile=None: [])
         monkeypatch.setattr(mcp, "discover_app_mcp_servers", lambda workspace, profile=None: [])
         _patch_mcp_choices(
             monkeypatch,
             f"{mcp.MCP_ADD_PREFIX}{mcp.VECTOR_SEARCH_SELECTION_PREFIX}main.search",
             categories={"vector-search"},
-        )
-        monkeypatch.setattr(
-            mcp,
-            "discover_vector_search_mcp_servers",
-            lambda workspace, profile=None, on_progress=None: mcp.vector_search_mcp_servers(
-                [("main", "search")], workspace
-            ),
         )
         monkeypatch.setattr(
             mcp,
@@ -890,22 +709,11 @@ class TestConfigureMcpCommand:
         monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
         monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace, profile=None: None)
         monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
-        monkeypatch.setattr(
-            mcp, "discover_external_mcp_connection_names", lambda workspace, profile=None: []
-        )
-        monkeypatch.setattr(mcp, "discover_genie_mcp_servers", lambda workspace, profile=None: [])
         monkeypatch.setattr(mcp, "discover_app_mcp_servers", lambda workspace, profile=None: [])
         _patch_mcp_choices(
             monkeypatch,
             f"{mcp.MCP_ADD_PREFIX}{mcp.UC_FUNCTIONS_SELECTION_PREFIX}analytics.tools",
             categories={"uc-functions"},
-        )
-        monkeypatch.setattr(
-            mcp,
-            "discover_uc_functions_mcp_servers",
-            lambda workspace, profile=None, on_progress=None: mcp.uc_functions_mcp_servers(
-                [("analytics", "tools")], workspace
-            ),
         )
         monkeypatch.setattr(
             mcp,
@@ -984,11 +792,7 @@ class TestConfigureMcpCommand:
         monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
         monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace, profile=None: None)
         monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
-        monkeypatch.setattr(
-            mcp, "discover_external_mcp_connection_names", lambda workspace, profile=None: []
-        )
         monkeypatch.setattr(mcp, "discover_app_mcp_servers", lambda workspace, profile=None: [])
-        monkeypatch.setattr(mcp, "discover_genie_mcp_servers", lambda workspace, profile=None: [])
         # Default sources only (no vector-search / uc-functions). Set the
         # trackers AFTER `_patch_mcp_choices` since it stubs the same discoveries.
         _patch_mcp_choices(monkeypatch)
@@ -1000,8 +804,6 @@ class TestConfigureMcpCommand:
 
             return _discover
 
-        monkeypatch.setattr(mcp, "discover_vector_search_mcp_servers", track("vector-search"))
-        monkeypatch.setattr(mcp, "discover_uc_functions_mcp_servers", track("uc-functions"))
         monkeypatch.setattr(mcp, "save_state", lambda state: None)
 
         assert mcp.configure_mcp_command() == 0
@@ -1014,10 +816,6 @@ class TestConfigureMcpCommand:
         monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
         monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace, profile=None: None)
         monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
-        monkeypatch.setattr(
-            mcp, "discover_external_mcp_connection_names", lambda workspace, profile=None: []
-        )
-        monkeypatch.setattr(mcp, "discover_genie_mcp_servers", lambda workspace, profile=None: [])
         monkeypatch.setattr(mcp, "discover_app_mcp_servers", lambda workspace, profile=None: [])
         _patch_mcp_choices(monkeypatch)
         monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
@@ -1050,18 +848,8 @@ class TestConfigureMcpCommand:
         monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
         monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace, profile=None: None)
         monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
-        monkeypatch.setattr(
-            mcp, "discover_external_mcp_connection_names", lambda workspace, profile=None: []
-        )
-        monkeypatch.setattr(mcp, "discover_genie_mcp_servers", lambda workspace, profile=None: [])
         monkeypatch.setattr(mcp, "discover_app_mcp_servers", lambda workspace, profile=None: [])
         monkeypatch.setattr(mcp, "discover_mcp_service_names", lambda workspace, profile=None: [])
-        monkeypatch.setattr(
-            mcp, "discover_vector_search_mcp_servers", lambda workspace, profile=None: []
-        )
-        monkeypatch.setattr(
-            mcp, "discover_uc_functions_mcp_servers", lambda workspace, profile=None: []
-        )
         monkeypatch.setattr(
             mcp,
             "prompt_for_mcp_server_choices",
@@ -1112,10 +900,6 @@ class TestConfigureMcpCommand:
         monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
         monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace, profile=None: None)
         monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
-        monkeypatch.setattr(
-            mcp, "discover_external_mcp_connection_names", lambda workspace, profile=None: []
-        )
-        monkeypatch.setattr(mcp, "discover_genie_mcp_servers", lambda workspace, profile=None: [])
         monkeypatch.setattr(mcp, "discover_app_mcp_servers", lambda workspace, profile=None: [])
         _patch_mcp_choices(monkeypatch, "databricks-sql")
         monkeypatch.setattr(
@@ -1175,10 +959,6 @@ class TestConfigureMcpCommand:
         monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
         monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace, profile=None: None)
         monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
-        monkeypatch.setattr(
-            mcp, "discover_external_mcp_connection_names", lambda workspace, profile=None: []
-        )
-        monkeypatch.setattr(mcp, "discover_genie_mcp_servers", lambda workspace, profile=None: [])
         monkeypatch.setattr(mcp, "discover_app_mcp_servers", lambda workspace, profile=None: [])
         _patch_mcp_choices(monkeypatch, "databricks-sql")
         monkeypatch.setattr(
@@ -1227,10 +1007,6 @@ class TestConfigureMcpCommand:
         monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
         monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace, profile=None: None)
         monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
-        monkeypatch.setattr(
-            mcp, "discover_external_mcp_connection_names", lambda workspace, profile=None: []
-        )
-        monkeypatch.setattr(mcp, "discover_genie_mcp_servers", lambda workspace, profile=None: [])
         monkeypatch.setattr(mcp, "discover_app_mcp_servers", lambda workspace, profile=None: [])
         _patch_mcp_choices(monkeypatch)
         # Stub returns empty list -> "entry wasn't in this agent's config".
@@ -1256,10 +1032,6 @@ class TestConfigureMcpCommand:
         monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
         monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace, profile=None: None)
         monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
-        monkeypatch.setattr(
-            mcp, "discover_external_mcp_connection_names", lambda workspace, profile=None: []
-        )
-        monkeypatch.setattr(mcp, "discover_genie_mcp_servers", lambda workspace, profile=None: [])
         monkeypatch.setattr(mcp, "discover_app_mcp_servers", lambda workspace, profile=None: [])
         _patch_mcp_choices(monkeypatch, f"{mcp.MCP_ADD_PREFIX}app:mcp-vanished")
         monkeypatch.setattr(
@@ -1284,10 +1056,6 @@ class TestConfigureMcpCommand:
         monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
         monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace, profile=None: None)
         monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
-        monkeypatch.setattr(
-            mcp, "discover_external_mcp_connection_names", lambda workspace, profile=None: []
-        )
-        monkeypatch.setattr(mcp, "discover_genie_mcp_servers", lambda workspace, profile=None: [])
         monkeypatch.setattr(mcp, "discover_app_mcp_servers", lambda workspace, profile=None: [])
         _patch_mcp_choices(monkeypatch, f"{mcp.MCP_ADD_PREFIX}bogus:value")
         monkeypatch.setattr(
@@ -1373,10 +1141,6 @@ class TestConfigureMcpCommand:
         monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
         monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace, profile=None: None)
         monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ALL_MCP_CLIENTS)
-        monkeypatch.setattr(
-            mcp, "discover_external_mcp_connection_names", lambda workspace, profile=None: []
-        )
-        monkeypatch.setattr(mcp, "discover_genie_mcp_servers", lambda workspace, profile=None: [])
         monkeypatch.setattr(mcp, "discover_app_mcp_servers", lambda workspace, profile=None: [])
         _patch_mcp_choices(monkeypatch, f"{mcp.MCP_ADD_PREFIX}managed:sql")
         monkeypatch.setattr(
@@ -1407,10 +1171,6 @@ class TestConfigureMcpCommand:
         monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
         monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace, profile=None: None)
         monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
-        monkeypatch.setattr(
-            mcp, "discover_external_mcp_connection_names", lambda workspace, profile=None: []
-        )
-        monkeypatch.setattr(mcp, "discover_genie_mcp_servers", lambda workspace, profile=None: [])
         monkeypatch.setattr(mcp, "discover_app_mcp_servers", lambda workspace, profile=None: [])
         _patch_mcp_choices(monkeypatch, f"{mcp.MCP_ADD_PREFIX}managed:sql")
         monkeypatch.setattr(
@@ -1458,10 +1218,6 @@ class TestConfigureMcpCommand:
         monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
         monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace, profile=None: None)
         monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
-        monkeypatch.setattr(
-            mcp, "discover_external_mcp_connection_names", lambda workspace, profile=None: []
-        )
-        monkeypatch.setattr(mcp, "discover_genie_mcp_servers", lambda workspace, profile=None: [])
         monkeypatch.setattr(mcp, "discover_app_mcp_servers", lambda workspace, profile=None: [])
         _patch_mcp_choices(monkeypatch)
         monkeypatch.setattr(

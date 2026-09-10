@@ -40,11 +40,7 @@ from ucode.databricks import (
     get_databricks_token,
     list_all_mcp_services,
     list_databricks_apps,
-    list_databricks_connections,
-    list_genie_spaces,
     list_mcp_services,
-    list_uc_functions_catalog_schemas,
-    list_vector_search_catalog_schemas,
     workspace_hostname,
 )
 from ucode.state import load_full_state, load_state, save_state
@@ -115,13 +111,6 @@ MCP_SERVICE_SELECTION_PREFIX = "mcp-service:"
 VECTOR_SEARCH_SELECTION_PREFIX = "vector-search:"
 UC_FUNCTIONS_SELECTION_PREFIX = "uc-functions:"
 MCP_ADD_PREFIX = "add:"
-MCP_CONNECTION_MARKERS = (
-    "is_mcp",
-    "is_mcp_connection",
-    "mcp",
-    "mcp_enabled",
-    "enable_mcp",
-)
 
 
 def add_claude_mcp_server(
@@ -382,59 +371,6 @@ def revert_mcp_configs(state: dict) -> dict[str, bool]:
     return results
 
 
-def _coerce_bool(value: object) -> bool | None:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"1", "true", "yes", "y"}:
-            return True
-        if normalized in {"0", "false", "no", "n"}:
-            return False
-    return None
-
-
-def _mcp_marker_value(connection: dict) -> bool | None:
-    containers = [connection]
-    options = connection.get("options")
-    if isinstance(options, dict):
-        containers.append(options)
-
-    for container in containers:
-        for marker in MCP_CONNECTION_MARKERS:
-            if marker in container:
-                value = _coerce_bool(container.get(marker))
-                if value is not None:
-                    return value
-    return None
-
-
-def is_external_mcp_connection(connection: dict) -> bool:
-    connection_type = connection.get("connection_type")
-    if not isinstance(connection_type, str) or connection_type.upper() != "HTTP":
-        return False
-
-    marker_value = _mcp_marker_value(connection)
-    if marker_value is False:
-        return False
-    return True
-
-
-def external_mcp_connection_names(connections: list[dict]) -> list[str]:
-    names: set[str] = set()
-    for connection in connections:
-        if not is_external_mcp_connection(connection):
-            continue
-        name = connection.get("name")
-        if isinstance(name, str) and name.strip():
-            names.add(name.strip())
-    return sorted(names)
-
-
-def discover_external_mcp_connection_names(workspace: str, profile: str | None = None) -> list[str]:
-    return external_mcp_connection_names(list_databricks_connections(workspace, profile))
-
-
 def discover_mcp_service_names(workspace: str, profile: str | None = None) -> list[str]:
     """Curated `system.ai.*` MCP services. Empty list if discovery fails so
     callers can fall back to legacy connection discovery without surfacing
@@ -473,46 +409,6 @@ def _normalize_workspace_title(text: str) -> str:
         elif chars and chars[-1] != "-":
             chars.append("-")
     return "".join(chars).strip("-")
-
-
-def _genie_server_name(title: str, space_id: str, taken: set[str]) -> str:
-    """Prefer a friendly name derived from the Genie space title; fall back to
-    the raw space_id when there is no title or the derived name collides with
-    one we already emitted."""
-    slug = _normalize_workspace_title(title) if title else ""
-    if slug:
-        candidate = f"databricks-genie-{slug}"
-        if candidate not in taken:
-            return candidate
-    return f"databricks-genie-{space_id}"
-
-
-def genie_mcp_servers(spaces: list[dict], workspace: str) -> list[dict]:
-    servers: list[dict] = []
-    seen_names: set[str] = set()
-    for space in spaces:
-        space_id = space.get("space_id")
-        if not isinstance(space_id, str) or not space_id.strip():
-            continue
-        space_id = space_id.strip()
-        raw_title = space.get("title")
-        title = raw_title.strip() if isinstance(raw_title, str) and raw_title.strip() else ""
-        server_name = _genie_server_name(title, space_id, seen_names)
-        if server_name in seen_names:
-            continue
-        seen_names.add(server_name)
-        servers.append(
-            {
-                "name": server_name,
-                "title": title or space_id,
-                "url": f"{workspace}/api/2.0/mcp/genie/{space_id}",
-            }
-        )
-    return sorted(servers, key=lambda server: str(server["title"]).lower())
-
-
-def discover_genie_mcp_servers(workspace: str, profile: str | None = None) -> list[dict]:
-    return genie_mcp_servers(list_genie_spaces(workspace, profile), workspace)
 
 
 def app_mcp_servers(apps: list[dict]) -> list[dict]:
@@ -559,66 +455,6 @@ def _catalog_schema_server_name(prefix: str, catalog: str, schema: str, taken: s
     while f"{candidate}-{counter}" in taken:
         counter += 1
     return f"{candidate}-{counter}"
-
-
-def vector_search_mcp_servers(pairs: list[tuple[str, str]], workspace: str) -> list[dict]:
-    servers: list[dict] = []
-    seen_names: set[str] = set()
-    for catalog, schema in pairs:
-        if not catalog or not schema:
-            continue
-        name = _catalog_schema_server_name("databricks-vector-search", catalog, schema, seen_names)
-        seen_names.add(name)
-        servers.append(
-            {
-                "name": name,
-                "title": f"{catalog}.{schema}",
-                "catalog": catalog,
-                "schema": schema,
-                "url": f"{workspace}/api/2.0/mcp/vector-search/{catalog}/{schema}",
-            }
-        )
-    return sorted(servers, key=lambda server: str(server["title"]).lower())
-
-
-def discover_vector_search_mcp_servers(
-    workspace: str,
-    profile: str | None = None,
-    on_progress: Callable[[int, int, int], None] | None = None,
-) -> list[dict]:
-    token = get_databricks_token(workspace, profile)
-    pairs, _reason = list_vector_search_catalog_schemas(workspace, token, on_progress=on_progress)
-    return vector_search_mcp_servers(pairs, workspace)
-
-
-def uc_functions_mcp_servers(pairs: list[tuple[str, str]], workspace: str) -> list[dict]:
-    servers: list[dict] = []
-    seen_names: set[str] = set()
-    for catalog, schema in pairs:
-        if not catalog or not schema:
-            continue
-        name = _catalog_schema_server_name("databricks-functions", catalog, schema, seen_names)
-        seen_names.add(name)
-        servers.append(
-            {
-                "name": name,
-                "title": f"{catalog}.{schema}",
-                "catalog": catalog,
-                "schema": schema,
-                "url": f"{workspace}/api/2.0/mcp/functions/{catalog}/{schema}",
-            }
-        )
-    return sorted(servers, key=lambda server: str(server["title"]).lower())
-
-
-def discover_uc_functions_mcp_servers(
-    workspace: str,
-    profile: str | None = None,
-    on_progress: Callable[[int, int, int], None] | None = None,
-) -> list[dict]:
-    token = get_databricks_token(workspace, profile)
-    pairs, _reason = list_uc_functions_catalog_schemas(workspace, token, on_progress=on_progress)
-    return uc_functions_mcp_servers(pairs, workspace)
 
 
 def _picker_style() -> questionary.Style:
@@ -1455,41 +1291,6 @@ def _discover_mcp_source(label: str, discover: Callable[[], list[Any]]) -> list[
         return []
 
 
-def _discover_mcp_source_with_progress(
-    label: str,
-    unit: str,
-    discover: Callable[[Callable[[int, int, int], None]], list[Any]],
-) -> list[Any]:
-    """Run a walk-based discovery behind a spinner whose message shows a live
-    count (e.g. `Searching Vector Search... 3/8 endpoints, 2 found`). `discover`
-    receives an `on_progress(done, total, found)` callback and `unit` names what
-    is being counted. Best-effort like `_discover_mcp_source`: any failure is
-    warned and yields an empty list."""
-    progress = {"done": 0, "total": 0, "found": 0}
-
-    def on_progress(done: int, total: int, found: int) -> None:
-        progress.update(done=done, total=total, found=found)
-
-    def message() -> str:
-        if progress["total"]:
-            return (
-                f"Searching {label}... {progress['done']}/{progress['total']} {unit}, "
-                f"{progress['found']} found"
-            )
-        return f"Searching {label}..."
-
-    try:
-        with spinner(message):
-            return discover(on_progress)
-    except PermissionDeniedError:
-        # See `_discover_mcp_source`: a consumer-only identity's 403 is a quiet skip.
-        print_note(f"Skipped {label} (no workspace access).")
-        return []
-    except (RuntimeError, OSError) as exc:
-        print_warning(f"Skipped {label} ({exc}).")
-        return []
-
-
 def _mcp_services_background_loader(
     workspace: str,
     profile: str | None,
@@ -1513,72 +1314,24 @@ def _mcp_services_background_loader(
 def _discover_selected_mcp_sources(
     workspace: str, profile: str | None, sources: set[str]
 ) -> dict[str, list]:
-    """Run discovery for the sources the user selected on the search screen.
-    Returns a dict keyed by picker argument (external/apps/services/genie/
-    vector_search/uc_functions); unselected sources yield empty lists so the
-    picker still renders (and can still remove already-registered servers)."""
-    external = (
-        _discover_mcp_source(
-            "external connections",
-            lambda: discover_external_mcp_connection_names(workspace, profile),
-        )
-        if "external" in sources
-        else []
-    )
-    apps = (
-        _discover_mcp_source(
-            "Databricks apps",
-            lambda: discover_app_mcp_servers(workspace, profile),
-        )
-        if "apps" in sources
-        else []
-    )
-    # MCP services: only the fast curated `system.ai` list is fetched synchronously so the
-    # picker opens immediately. The slow workspace-wide walk streams in afterward via the
-    # picker's background loader (see `_mcp_services_background_loader`).
+    """Discover the picker's sources. The picker searches a single source — MCP services — so
+    this fetches the fast curated `system.ai` list synchronously (the slow workspace-wide walk
+    streams in afterward via the picker's background loader). The other keys stay in the returned
+    dict as empty lists so the picker call is unchanged and can still render/remove
+    already-registered servers of any type."""
     services: list[str] = []
     if MCP_SERVICES_SOURCE in sources:
         services = _discover_mcp_source(
             "MCP services",
             lambda: discover_mcp_service_names(workspace, profile),
         )
-    genie = (
-        _discover_mcp_source(
-            "Genie spaces",
-            lambda: discover_genie_mcp_servers(workspace, profile),
-        )
-        if "genie" in sources
-        else []
-    )
-    vector_search = (
-        _discover_mcp_source_with_progress(
-            "Vector Search",
-            "endpoints",
-            lambda on_progress: discover_vector_search_mcp_servers(
-                workspace, profile, on_progress=on_progress
-            ),
-        )
-        if "vector-search" in sources
-        else []
-    )
-    uc_functions = (
-        _discover_mcp_source_with_progress(
-            "UC functions",
-            "schemas",
-            lambda on_progress: discover_uc_functions_mcp_servers(
-                workspace, profile, on_progress=on_progress
-            ),
-        )
-        if "uc-functions" in sources
-        else []
-    )
     return {
-        "external": external,
-        "apps": apps,
+        "external": [],
+        "apps": [],
         "services": services,
-        "genie": genie,
-        "vector_search": vector_search,
-        "uc_functions": uc_functions,
+        "genie": [],
+        "vector_search": [],
+        "uc_functions": [],
     }
 
 

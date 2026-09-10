@@ -279,6 +279,20 @@ class TestModelTokenLimits:
     def test_uncapped_model_returns_none(self):
         assert db_mod.model_token_limits("system.ai.kimi-k2-7-code") is None
 
+    def test_gateway_caps_measured_against_the_workspace(self):
+        # Each `output` is the cap the gateway enforces; a request above it fails
+        # with HTTP 400.
+        assert db_mod.model_token_limits("system.ai.qwen35-122b-a10b")["output"] == 25_000
+        assert db_mod.model_token_limits("system.ai.gpt-oss-120b")["output"] == 25_000
+        assert db_mod.model_token_limits("system.ai.gpt-oss-20b")["output"] == 25_000
+        assert db_mod.model_token_limits("system.ai.llama-4-maverick")["output"] == 8_192
+        assert db_mod.model_token_limits("system.ai.gemma-3-12b")["output"] == 8_192
+
+    def test_llama_3_endpoints_do_not_take_the_maverick_context(self):
+        # A bare `llama` key would pin Maverick's 1M context on the 128k Llama 3
+        # endpoints.
+        assert db_mod.model_token_limits("system.ai.meta-llama-3-3-70b-instruct") is None
+
 
 class TestDiscoverModelServices:
     def test_buckets_families_by_name(self, monkeypatch):

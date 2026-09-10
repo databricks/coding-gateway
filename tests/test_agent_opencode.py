@@ -189,6 +189,21 @@ class TestRenderOverlay:
         kimi = overlay["provider"]["databricks-oss"]["models"]["system.ai.kimi-k2-7-code"]
         assert "limit" not in kimi
 
+    def test_qwen_gets_token_limits(self):
+        model = "system.ai.qwen35-122b-a10b"
+        overlay, _ = opencode.render_overlay(model, "tok", _base_urls(), {"oss": [model]})
+        qwen = overlay["provider"]["databricks-oss"]["models"][model]
+        assert qwen["limit"] == {"context": 262144, "output": 25000}
+
+    def test_oss_provider_opts_out_of_the_prompt_cache_key(self):
+        # OpenCode stamps `prompt_cache_key` on every `@ai-sdk/openai` request and
+        # the gateway rejects the unknown field. It reads the opt-out from the
+        # provider options only, so a per-model entry would not suppress it.
+        model = "system.ai.qwen35-122b-a10b"
+        overlay, _ = opencode.render_overlay(model, "tok", _base_urls(), {"oss": [model]})
+        assert overlay["provider"]["databricks-oss"]["options"]["setCacheKey"] is False
+        assert "setCacheKey" not in overlay["provider"]["databricks-oss"]["models"][model]
+
     def test_token_in_api_key(self):
         models = {"anthropic": ["claude-sonnet"]}
         overlay, _ = opencode.render_overlay("claude-sonnet", "mytoken", _base_urls(), models)

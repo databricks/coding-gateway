@@ -1538,9 +1538,16 @@ def classify_model_family(model_id: str) -> str | None:
 # context and output together. Keyed by family substring; add an entry to bound
 # a new model.
 _MODEL_TOKEN_LIMITS: dict[str, dict[str, int]] = {
-    # GLM-4.6: 200k context, but the gateway caps output well below the model's
-    # native 128k — pin 25k so requests aren't rejected.
+    # Every `output` here is the gateway's cap, which sits below the model's
+    # native output length. Neither the model-services listing nor the
+    # serving-endpoints API reports the cap, so it cannot be discovered.
     "glm": {"context": 200_000, "output": 25_000},
+    "qwen": {"context": 262_144, "output": 25_000},
+    "gpt-oss": {"context": 131_072, "output": 25_000},
+    # Keyed on the full name, not `llama`: the Llama 3 endpoints have a 128k
+    # context, so a bare `llama` key would pin 1M on them.
+    "llama-4-maverick": {"context": 1_000_000, "output": 8_192},
+    "gemma": {"context": 131_072, "output": 8_192},
 }
 
 

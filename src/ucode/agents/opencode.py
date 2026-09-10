@@ -279,6 +279,12 @@ def render_overlay(
                 "baseURL": opencode_base_urls["oss"],
                 "apiKey": token,
                 "headers": auth_headers,
+                # OpenCode stamps `prompt_cache_key: <sessionID>` on every
+                # `@ai-sdk/openai` request; the Databricks gateway's strict
+                # validator rejects the unknown field with HTTP 400. OpenCode
+                # reads this opt-out from the provider `options` only — a
+                # per-model `options` entry does not suppress the field.
+                "setCacheKey": False,
             },
             "models": {m: _oss_model_overlay(m, ua_header) for m in oss_models},
         }

@@ -49,7 +49,7 @@ from ucode.smart_routing.claude_hooks import (
     remove_smart_routing_hooks,
     sync_smart_routing_hooks,
 )
-from ucode.state import MANAGED_OVERLAY_KEY, get_provider_service, mark_tool_managed, save_state
+from ucode.state import MANAGED_OVERLAY_KEY, mark_tool_managed, save_state
 from ucode.telemetry import agent_version, ucode_version
 from ucode.tracing import tracing_env
 from ucode.ui import print_note, print_success, print_warning
@@ -701,7 +701,7 @@ def write_tool_config(
 
     _reconcile_managed_settings(
         state,
-        lambda base: _compose(base, enforce_model_default_hierarchy=True),
+        lambda base: _compose(base, enforce_model_default_hierarchy=provider is None),
         managed_file_keys,
         relayed,
     )
@@ -1150,13 +1150,6 @@ def _original_launch_model(state: dict) -> str | None:
     return default_model(state)
 
 
-def _has_provider_launch(state: dict) -> bool:
-    transient = state.get("_claude_launch_provider")
-    return (isinstance(transient, str) and bool(transient.strip())) or bool(
-        get_provider_service(state, "claude")
-    )
-
-
 def _launch_model_args(tool_args: list[str], launch_model: str | None) -> list[str]:
     if not launch_model or has_explicit_model_arg(tool_args):
         return []
@@ -1308,6 +1301,10 @@ def launch(
 ) -> None:
     binary = SPEC["binary"]
     workspace = state.get("workspace")
+    if workspace and os.environ.get(GATEWAY_MODEL_DISCOVERY_ENV_VAR) == "1":
+        # Discovery is launch-scoped. Pass it in the process environment rather
+        # than persisting it in Claude's private or OS-managed settings.
+        os.environ["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
     if state.get("claude_relayed"):
         _launch_relayed(state, binary, tool_args)
         return
@@ -1329,14 +1326,6 @@ def launch(
             model_name=_maybe_add_1m_suffix,
         )
         return
-    if (
-        workspace
-        and os.environ.get(GATEWAY_MODEL_DISCOVERY_ENV_VAR) == "1"
-        and not _has_provider_launch(state)
-    ):
-        # Discovery is launch-scoped. Pass it in the process environment rather
-        # than persisting it in Claude's private or OS-managed settings.
-        os.environ["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
     if workspace:
         os.environ["OAUTH_TOKEN"] = get_databricks_token(workspace, state.get("profile"))
     if options.claude_launch_model:

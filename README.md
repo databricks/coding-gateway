@@ -119,14 +119,25 @@ ug configure mcp
 ```
 
 Add Databricks MCP servers to installed MCP-capable tools: Codex, Claude Code, Gemini CLI, OpenCode, GitHub Copilot CLI, and Cursor Agent.
-Options are shown in this order:
 
-- Discovered external MCP connections
-- Databricks SQL
-- Managed Databricks MCPs (Vector Search, UC Functions, etc.)
-- Custom MCP server URL
+The interactive picker discovers **MCP services** (the `system.ai.*` and workspace-wide
+`<catalog>.<schema>` Unity Catalog MCP services) and a custom MCP server URL.
 
-Discovered external MCP connections are listed directly.
+V2 AI Gateway servers — Vector Search, UC Functions, external connections, Genie spaces, and
+Databricks apps — are **not** offered in the picker, because consumer-only identities can't
+reach the V2 AI Gateway. Workspace users add them non-interactively by naming them in
+`--services` with a typed selector:
+
+```bash
+ug mcp add --services vector-search:main.docs
+ug mcp add --services uc-functions:main.tools
+ug mcp add --services external:my-connection
+ug mcp add --services genie-space:<space-id>
+ug mcp add --services app:my-app
+```
+
+These require workspace access; a consumer-only identity is gated at the AI Gateway (which
+`ug` already hits when it sets up models), not by this command.
 
 Every Databricks MCP server is registered as a local **stdio** server that runs `ug mcp-proxy`
 — a small bridge (shipped with `ug`) between the coding tool and the Databricks

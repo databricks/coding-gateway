@@ -2489,6 +2489,55 @@ class TestSkillMcpLocations:
         assert mcp._skill_mcp_locations(_skills_state()) == []
 
 
+class TestUnionLocations:
+    def test_appends_new_after_existing(self):
+        assert mcp._union_locations(["a.b"], ["c.d"]) == ["a.b", "c.d"]
+
+    def test_drops_locations_already_present(self):
+        assert mcp._union_locations(["a.b", "c.d"], ["c.d", "e.f"]) == ["a.b", "c.d", "e.f"]
+
+    def test_empty_base_returns_new(self):
+        assert mcp._union_locations([], ["a.b", "c.d"]) == ["a.b", "c.d"]
+
+    def test_drops_duplicate_new_locations(self):
+        assert mcp._union_locations(["a.b"], ["c.d", "c.d"]) == ["a.b", "c.d"]
+
+
+class TestAddSkillsCommand:
+    """`ucode skill add --mcp` unions schemas into the connection scope rather
+    than replacing it (unlike `configure_skills_mcp_command`)."""
+
+    def test_unions_into_existing_scope(self, monkeypatch):
+        state = _skills_state(mcp._resolve_skills_mcp_servers(WS, ["claude"], ["A.a"], []))
+        _stub_location_base(monkeypatch, state)
+        monkeypatch.setattr(mcp, "configure_client_mcp_server", lambda *a, **kw: [])
+        monkeypatch.setattr(mcp, "save_state", lambda s: None)
+
+        assert mcp.add_skills_command(["B.b"]) == 0
+
+        assert _find_skills(state["mcp_servers"])[0]["skill_locations"] == ["A.a", "B.b"]
+
+    def test_existing_schema_leaves_scope_unchanged(self, monkeypatch):
+        state = _skills_state(mcp._resolve_skills_mcp_servers(WS, ["claude"], ["A.a", "B.b"], []))
+        _stub_location_base(monkeypatch, state)
+        monkeypatch.setattr(mcp, "configure_client_mcp_server", lambda *a, **kw: [])
+        monkeypatch.setattr(mcp, "save_state", lambda s: None)
+
+        assert mcp.add_skills_command(["A.a"]) == 0
+
+        assert _find_skills(state["mcp_servers"])[0]["skill_locations"] == ["A.a", "B.b"]
+
+    def test_registers_scope_from_empty_state(self, monkeypatch):
+        state = _skills_state()
+        _stub_location_base(monkeypatch, state)
+        monkeypatch.setattr(mcp, "configure_client_mcp_server", lambda *a, **kw: [])
+        monkeypatch.setattr(mcp, "save_state", lambda s: None)
+
+        assert mcp.add_skills_command(["A.a"]) == 0
+
+        assert _find_skills(state["mcp_servers"])[0]["skill_locations"] == ["A.a"]
+
+
 class TestRegisterSchemalessSkillsConnection:
     def _stub(self, monkeypatch):
         saved_states: list[dict] = []
@@ -2808,103 +2857,6 @@ class TestApplyManagedMcpServers:
             self._managed({"name": "databricks-sql", "type": "sql"}), "not-a-client", WS
         )
         assert registered == []
-
-
-class TestApplyManagedSkills:
-    def _managed(self, *names):
-        return {"skills": {"names": list(names)}} if names else {}
-
-    def _skills_entry(self, servers):
-        return next(s for s in servers if s.get("kind") == mcp.SKILLS_MCP_KIND)
-
-    def _patch_apply(self, monkeypatch):
-        """Stub out the config-file writes and report whether a change was applied."""
-        monkeypatch.setattr(mcp, "save_state", lambda state: None)
-        monkeypatch.setattr(
-            mcp, "apply_mcp_server_changes", lambda orig, working, *a, **k: orig != working
-        )
-
-    def test_registers_managed_locations_for_the_launching_tool(self, monkeypatch):
-        self._patch_apply(monkeypatch)
-        state = {"workspace": WS, "mcp_servers": []}
-        applied = mcp.apply_managed_skills(state, self._managed("cat.sch"), "claude", WS)
-        assert applied == ["cat.sch"]
-        entry = self._skills_entry(state["mcp_servers"])
-        assert entry["skill_locations"] == ["cat.sch"]
-        assert entry["clients"] == ["claude"]
-        assert state["managed_skill_locations"] == ["cat.sch"]
-
-    def test_preserves_developer_locations_and_drops_removed_managed_ones(self, monkeypatch):
-        self._patch_apply(monkeypatch)
-        # The developer configured `mine.own`; a prior launch applied `old.managed`, now dropped from
-        # the config in favor of `new.managed`.
-        state = {
-            "workspace": WS,
-            "managed_skill_locations": ["old.managed"],
-            "mcp_servers": [
-                {
-                    "name": mcp.SKILLS_MCP_SERVER_NAME,
-                    "kind": mcp.SKILLS_MCP_KIND,
-                    "skill_locations": ["mine.own", "old.managed"],
-                    "clients": ["claude"],
-                }
-            ],
-        }
-        applied = mcp.apply_managed_skills(state, self._managed("new.managed"), "claude", WS)
-        assert applied == ["new.managed"]
-        entry = self._skills_entry(state["mcp_servers"])
-        assert entry["skill_locations"] == ["mine.own", "new.managed"]
-        assert state["managed_skill_locations"] == ["new.managed"]
-
-    def test_removed_managed_schema_leaves_developer_locations(self, monkeypatch):
-        self._patch_apply(monkeypatch)
-        state = {
-            "workspace": WS,
-            "managed_skill_locations": ["gone.managed"],
-            "mcp_servers": [
-                {
-                    "name": mcp.SKILLS_MCP_SERVER_NAME,
-                    "kind": mcp.SKILLS_MCP_KIND,
-                    "skill_locations": ["mine.own", "gone.managed"],
-                    "clients": ["claude"],
-                }
-            ],
-        }
-        applied = mcp.apply_managed_skills(state, self._managed(), "claude", WS)
-        assert applied == []  # nothing managed now, but the removal still applied
-        entry = self._skills_entry(state["mcp_servers"])
-        assert entry["skill_locations"] == ["mine.own"]
-        assert state["managed_skill_locations"] == []
-
-    def test_nothing_managed_and_none_before_is_a_noop(self, monkeypatch):
-        monkeypatch.setattr(mcp, "save_state", lambda state: pytest.fail("should not persist"))
-        monkeypatch.setattr(
-            mcp, "apply_mcp_server_changes", lambda *a, **k: pytest.fail("should not apply")
-        )
-        state = {"workspace": WS, "mcp_servers": []}
-        assert mcp.apply_managed_skills(state, self._managed(), "claude", WS) == []
-        assert "mcp_servers" in state and state["mcp_servers"] == []
-        assert "managed_skill_locations" not in state
-
-    def test_unchanged_managed_set_returns_empty(self, monkeypatch):
-        self._patch_apply(monkeypatch)
-        # Build the stored entry exactly as a re-resolve would, so an unchanged config is a true
-        # no-op rather than differing on the derived url/auth fields.
-        entry = mcp._resolve_skills_mcp_servers(WS, ["claude"], ["cat.sch"], [])[0]
-        state = {
-            "workspace": WS,
-            "managed_skill_locations": ["cat.sch"],
-            "mcp_servers": [entry],
-        }
-        # Same config, same tool already registered: no change, so no note-worthy locations returned.
-        assert mcp.apply_managed_skills(state, self._managed("cat.sch"), "claude", WS) == []
-
-    def test_non_client_tool_returns_empty(self, monkeypatch):
-        monkeypatch.setattr(
-            mcp, "apply_mcp_server_changes", lambda *a, **k: pytest.fail("should not apply")
-        )
-        state = {"workspace": WS, "mcp_servers": []}
-        assert mcp.apply_managed_skills(state, self._managed("cat.sch"), "not-a-client", WS) == []
 
 
 class TestPromptForMcpSearchSourcesExclusion:

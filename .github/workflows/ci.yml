@@ -54,7 +54,7 @@ jobs:
           @anthropic-ai/claude-code
           @openai/codex
           @google/gemini-cli
-          opencode-ai
+          opencode-ai@1
           @github/copilot@1.0.80
           @earendil-works/pi-coding-agent
       - run: uv lock

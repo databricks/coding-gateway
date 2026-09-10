@@ -218,9 +218,6 @@ def _model_config_payload(tool: str, model_config: dict) -> dict:
 def _enabled_agent_payload(tool: str, agent_config: dict) -> dict:
     """Build one ``EnabledAgent`` entry (agent enum + its ``AgentConfig``)."""
     config: dict = {}
-    use_as_global = agent_config.get("use_as_global_settings")
-    if isinstance(use_as_global, bool):
-        config["use_as_global_settings"] = use_as_global
     headers = agent_config.get("custom_headers")
     if isinstance(headers, dict):
         clean = {k: v for k, v in headers.items() if isinstance(k, str) and isinstance(v, str)}

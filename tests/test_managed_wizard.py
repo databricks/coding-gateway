@@ -1,4 +1,4 @@
-"""Tests for the interactive `ucode setup` flow and its CLI wiring.
+"""Tests for the interactive `ug setup` flow and its CLI wiring.
 
 The wizard is mostly orchestration, so these focus on the parts where it can silently produce a
 wrong manifest: reading tracing/MCP/skills back out of ``state.json``, classifying MCP URLs into
@@ -264,7 +264,7 @@ class TestExistingConfigHandling:
         assert not select.called
         message = str(exc_info.value)
         assert message == wizard.CODING_AGENT_CONFIGS_DISABLED_MESSAGE
-        assert "`ucode configure`" in message
+        assert "`ug configure`" in message
         # The raw 404 / JSON body must not leak into the message.
         assert "404" not in message
         assert "FEATURE_DISABLED" not in message
@@ -287,7 +287,7 @@ class TestExistingConfigHandling:
 
     def test_warning_does_not_itemize_the_existing_config(self):
         # The warning is the same whatever the config holds: an inventory doesn't change what the
-        # admin should do, and `ucode setup show` prints the real thing for comparison.
+        # admin should do, and `ug setup show` prints the real thing for comparison.
         with (
             patch.object(wizard, "get_managed_config", return_value=(self.RICH_CONFIG, None)),
             patch.object(wizard, "prompt_for_selection", return_value="create"),
@@ -372,22 +372,22 @@ class TestExistingConfigHandling:
 
 
 class TestStepBanner:
-    """The step headers brand themselves to the invoking command, so a `ucode configure` run
-    doesn't show `ucode setup` headers."""
+    """The step headers brand themselves to the invoking command, so a `ug configure` run
+    doesn't show `ug setup` headers."""
 
     def test_defaults_to_ucode_setup(self):
         with patch.object(wizard, "print_section") as section:
             wizard._step_banner(1, "Agents")
-        assert section.call_args.args[0].startswith("ucode setup · step 1 of ")
+        assert section.call_args.args[0].startswith("ug setup · step 1 of ")
 
     def test_uses_the_command_label_when_given(self):
         with patch.object(wizard, "print_section") as section:
-            wizard._step_banner(2, "Models", "ucode configure")
-        assert section.call_args.args[0].startswith("ucode configure · step 2 of ")
+            wizard._step_banner(2, "Models", "ug configure")
+        assert section.call_args.args[0].startswith("ug configure · step 2 of ")
 
 
 class TestSetupCommandToken:
-    """A caller (e.g. `ucode configure`) can hand setup a token so its admin gate uses the same
+    """A caller (e.g. `ug configure`) can hand setup a token so its admin gate uses the same
     identity as the routing decision, instead of fetching a second time."""
 
     def test_reuses_a_passed_token_and_skips_a_second_fetch(self):
@@ -1485,7 +1485,7 @@ CLAUDE_ONLY = {"claude": {"model_config": {"default_model": "system.ai.claude-op
 
 class TestBudgetPolicy:
     def test_no_up_front_gate(self):
-        # Running `ucode setup spend-tiers` is the consent, so the flow asks no "set up a policy?"
+        # Running `ug setup spend-tiers` is the consent, so the flow asks no "set up a policy?"
         # question — it goes straight to listing budgets. (The only yes/no it asks is "add another
         # tier?", after a tier is built.)
         with (
@@ -1841,24 +1841,18 @@ class TestSummary:
         assert "system.ai.gemini-3-flash" in out
         assert "models:" not in out
 
-    def test_scope_label_only_for_global_capable_agents(self, capsys):
-        # claude/codex can use global settings, so they carry the scope; gemini can't, so it doesn't.
+    def test_summary_has_no_settings_scope_choice(self, capsys):
         manifest = {
-            "default_agent": "claude",
+            "default_agent": "codex",
             "enabled_agents": {
-                "claude": {
-                    "model_config": {"default_model": "system.ai.claude-opus-4-8"},
-                    "use_as_global_settings": True,
-                },
+                "codex": {"model_config": {"default_model": "system.ai.gpt-5"}},
                 "gemini": {"model_config": {"default_model": "system.ai.gemini-3-flash"}},
             },
         }
         wizard._render_summary(WORKSPACE, manifest)
         out = capsys.readouterr().out
-        assert "global settings" in out
-        # The gemini line names its model but carries no global-settings/ucode-only scope.
-        gemini_line = next(line for line in out.splitlines() if "gemini-3-flash" in line)
-        assert "ucode-only" not in gemini_line and "global settings" not in gemini_line
+        assert "global settings" not in out
+        assert "ucode-only" not in out
 
 
 class TestSetupFromFile:
@@ -2138,7 +2132,7 @@ class TestSearchablePickers:
         assert any("model" in p for p in searchable_prompts), searchable_prompts
 
 
-# A minimal authored manifest (agents + models only), the shape `ucode setup` now writes.
+# A minimal authored manifest (agents + models only), the shape `ug setup` now writes.
 AGENTS_ONLY = {
     "default_agent": "claude",
     "enabled_agents": {"claude": {"model_config": {"default_model": "system.ai.claude-opus-4-8"}}},
@@ -2205,21 +2199,21 @@ class TestNextSteps:
         manifest = {**AGENTS_ONLY, "skills": {"names": ["main.default"]}}
         wizard._print_next_steps(manifest)
         out = capsys.readouterr().out
-        assert "ucode setup mcps" in out
-        assert "ucode setup skills" in out
-        assert "ucode setup spend-tiers" in out
-        assert "ucode publish" in out
+        assert "ug setup mcps" in out
+        assert "ug setup skills" in out
+        assert "ug setup spend-tiers" in out
+        assert "ug publish" in out
 
     def test_dry_run_says_nothing_was_saved(self, capsys, monkeypatch):
         monkeypatch.setattr(config_io_mod, "_dry_run", True)
         wizard._print_next_steps(AGENTS_ONLY)
         out = capsys.readouterr().out
         assert "Dry run" in out
-        assert "ucode publish" not in out
+        assert "ug publish" not in out
 
 
 class TestSectionCommands:
-    """The `ucode setup mcps` / `skills` / `spend-tiers` section commands."""
+    """The `ug setup mcps` / `skills` / `spend-tiers` section commands."""
 
     @staticmethod
     def _admin(**overrides):
@@ -2248,13 +2242,13 @@ class TestSectionCommands:
 
     def test_mcp_requires_an_authored_config(self):
         # No manifest on disk → the command can't edit a section that doesn't exist.
-        with pytest.raises(RuntimeError, match="ucode setup"):
+        with pytest.raises(RuntimeError, match="ug setup"):
             self._run(wizard.setup_mcp_command)
 
     def test_mcp_requires_enabled_agents(self):
         # A launch stores `{}` to mean "no managed config"; that must not count as authored.
         managed_config_mod.save_managed_state(WORKSPACE, {})
-        with pytest.raises(RuntimeError, match="ucode setup"):
+        with pytest.raises(RuntimeError, match="ug setup"):
             self._run(wizard.setup_mcp_command)
 
     def test_mcp_writes_only_its_section(self):
@@ -2287,7 +2281,7 @@ class TestSectionCommands:
         assert not save.called
 
     def test_mcp_carries_forward_preregistered_servers(self):
-        # An admin who ran `ucode configure mcp` first arrives with those servers already registered,
+        # An admin who ran `ug configure mcp` first arrives with those servers already registered,
         # so the picker leaves local state unchanged (before == after). The manifest doesn't carry them
         # yet, so `setup mcps` must still save them rather than report "no changes" and drop them.
         managed_config_mod.save_managed_state(WORKSPACE, AGENTS_ONLY)
@@ -2379,12 +2373,12 @@ class TestSetupHelp:
         wizard.setup_help_command()
         out = capsys.readouterr().out
         for command in (
-            "ucode setup",
-            "ucode setup mcps",
-            "ucode setup skills",
-            "ucode setup spend-tiers",
-            "ucode setup show",
-            "ucode publish",
+            "ug setup",
+            "ug setup mcps",
+            "ug setup skills",
+            "ug setup spend-tiers",
+            "ug setup show",
+            "ug publish",
         ):
             assert command in out
 
@@ -2471,7 +2465,7 @@ class TestPublishCommand:
 
     def test_unauthored_config_is_an_actionable_error(self):
         with patch.object(wizard, "load_state", return_value={"workspace": WORKSPACE}):
-            with pytest.raises(RuntimeError, match="ucode setup"):
+            with pytest.raises(RuntimeError, match="ug setup"):
                 wizard.publish_command()
 
     def test_creates_when_no_config_exists(self):
@@ -2484,7 +2478,7 @@ class TestPublishCommand:
 
         assert self._run(create_coding_agent_config=fake_create) == 0
         assert created["workspace"] == WORKSPACE
-        # What goes over the wire is proto-JSON, not ucode's manifest shape.
+        # What goes over the wire is proto-JSON, not ug's manifest shape.
         assert created["payload"]["default_agent"] == "CODING_AGENT_CLAUDE_CODE"
 
     def test_updates_in_place_when_a_config_exists(self):
@@ -2790,7 +2784,7 @@ class TestPublishFailureMessages:
             'HTTP 400 Bad Request: {"error_code":"FEATURE_DISABLED","message":"..."}'
         )
         assert message == wizard.CODING_AGENT_CONFIGS_DISABLED_MESSAGE
-        assert "`ucode configure`" in message
+        assert "`ug configure`" in message
 
     def test_permission_denied_says_admin_is_required(self):
         message = wizard._explain_publish_failure(
@@ -2863,8 +2857,11 @@ class TestCliWiring:
             assert publish.call_args.kwargs["file_path"] == "/tmp/cfg.json"
 
     def test_publish_error_exits_nonzero_with_a_message(self):
-        with patch.object(
-            cli_mod, "publish_command", side_effect=RuntimeError("no config authored")
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch.object(
+                cli_mod, "publish_command", side_effect=RuntimeError("no config authored")
+            ),
         ):
             result = runner.invoke(app, ["publish"])
         assert result.exit_code == 1
@@ -2872,7 +2869,10 @@ class TestCliWiring:
     def test_successful_publish_exits_zero(self):
         # Same trap as `setup`: `typer.Exit` subclasses RuntimeError, so raising it inside the
         # command's try block would report success as "ERROR 0".
-        with patch.object(cli_mod, "publish_command", return_value=0):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch.object(cli_mod, "publish_command", return_value=0),
+        ):
             result = runner.invoke(app, ["publish"])
         assert result.exit_code == 0
         assert "ERROR" not in result.output
@@ -2960,7 +2960,7 @@ class TestCliWiring:
         assert fn.call_args.args[0] == ["main.a", "main.b"]
 
     def test_setup_help_needs_no_auth(self):
-        # `ucode setup help` reads the local draft only — it must not shell out to install the CLI.
+        # `ug setup help` reads the local draft only — it must not shell out to install the CLI.
         with (
             patch("ucode.cli.install_databricks_cli") as install,
             patch("ucode.cli.setup_help_command", return_value=0) as fn,
@@ -2973,13 +2973,11 @@ class TestCliWiring:
     def test_section_command_runtime_error_exits_1(self):
         with (
             patch("ucode.cli.install_databricks_cli"),
-            patch(
-                "ucode.cli.setup_mcp_command", side_effect=RuntimeError("run `ucode setup` first")
-            ),
+            patch("ucode.cli.setup_mcp_command", side_effect=RuntimeError("run `ug setup` first")),
         ):
             result = runner.invoke(app, ["setup", "mcps"])
         assert result.exit_code == 1
-        assert "ucode setup" in _out(result)
+        assert "ug setup" in _out(result)
 
     def test_section_command_interrupt_exits_130(self):
         with (

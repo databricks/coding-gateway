@@ -1,7 +1,7 @@
 """Databricks AI Gateway routing helpers for Claude Code sessions and subagents.
 
 Claude-specific configuration on top of the shared
-:mod:`ucode.smart_routing.routing` core. The ``task_v1`` router infers a
+:mod:`ucode.smart_routing.routing` core. The ``task_v2`` router infers a
 "Claude Code" (``cc``) scenario when it is offered only Claude arms, and that
 scenario REQUIRES its full menu — both ``claude-opus-4-8`` and
 ``claude-sonnet-5`` — or it returns BAD_REQUEST. So both arms are always offered.
@@ -16,13 +16,12 @@ import urllib.request  # noqa: F401
 from typing import Any
 
 from ucode.config_io import APP_DIR
-from ucode.databricks import get_databricks_token
 from ucode.smart_routing import routing
 from ucode.smart_routing.routing import RoutingDecision
 
 ROUTER_NAME = routing.ROUTER_NAME
 REQUEST_TIMEOUT_S = routing.REQUEST_TIMEOUT_S
-# Frozen task_v1 "cc" scenario menu (ai-gateway CanonicalModelNames): the router
+# Frozen task_v2 "cc" scenario menu (ai-gateway CanonicalModelNames): the router
 # rejects the request unless BOTH are offered as route_options.
 CLAUDE_ROUTE_ARMS = ("claude-opus-4-8", "claude-sonnet-5")
 # Claude Code's subagent-spawn tool (renamed Task -> Agent); match both.
@@ -32,31 +31,6 @@ AUDIT_PATH = APP_DIR / "claude-smart-routing-audit.jsonl"
 DECISIONS_PATH = APP_DIR / "claude-smart-routing-decisions.jsonl"
 
 _normalize_model = routing.normalize_model
-
-
-def route_launch_model(state: dict, tool_args: list[str]):
-    """Route a root Claude Code launch on the launch-time prompt, if there is one.
-
-    Returns (None, None) when the launch carries no prompt (a bare interactive
-    session): with no task signal the router can only return its floor arm, so
-    routing would just add a round-trip and silently override the user's default
-    model. In that case we don't route and keep the configured default. Routing
-    on a typed-in first prompt is out of scope — no hook/MCP can retarget the
-    root model once the session is running.
-    """
-    task = _launch_routing_task(tool_args)
-    if task is None:
-        return None, None
-    workspace = state.get("workspace")
-    models = state.get("claude_models")
-    if not isinstance(workspace, str) or not isinstance(models, dict):
-        return None, "workspace model metadata is unavailable"
-    try:
-        token = get_databricks_token(workspace, state.get("profile"))
-    except RuntimeError as exc:
-        return None, f"could not authenticate the routing request: {exc}"
-    available = [m for m in models.values() if isinstance(m, str) and m]
-    return request_routing_decision(workspace, token, task, available)
 
 
 # Claude Code CLI options that consume a following value (from `claude --help`);
@@ -98,14 +72,6 @@ CLAUDE_VALUE_OPTIONS = frozenset(
 )
 
 
-def _launch_routing_task(tool_args: list[str]) -> str | None:
-    # The routing task is the user's real first prompt when it's on the command
-    # line (`claude "<prompt>"` or `claude -p "<prompt>"`, or after `--`). A bare
-    # interactive launch has no prompt yet → None, and the caller skips routing
-    # (the root model can't be re-routed once the session is running).
-    return routing.extract_seed_prompt(tool_args, CLAUDE_VALUE_OPTIONS)
-
-
 def request_routing_decision(
     workspace: str,
     token: str,
@@ -114,7 +80,7 @@ def request_routing_decision(
     *,
     timeout: float = REQUEST_TIMEOUT_S,
 ) -> tuple[RoutingDecision | None, str | None]:
-    """Ask the workspace ``task_v1`` router for a servable Claude model.
+    """Ask the router for a servable Claude model.
 
     Offers the full ``cc`` menu; resolves the router's pick back to the
     workspace's routable id (e.g. ``system.ai.claude-opus-4-8``).
@@ -130,6 +96,7 @@ def request_routing_decision(
         task,
         [(arm, "claude") for arm in CLAUDE_ROUTE_ARMS],
         lambda raw_model: available.get(_normalize_model(raw_model)),
+        router_name=routing.configured_router_name(),
         timeout=timeout,
     )
 

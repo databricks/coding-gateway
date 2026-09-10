@@ -17,6 +17,11 @@ WS = "https://example.databricks.com"
 SHARED_EXPERIMENT_ID = "111"
 
 
+@pytest.fixture(autouse=True)
+def _avoid_real_managed_settings(monkeypatch):
+    monkeypatch.setattr(claude, "_managed_settings_path", lambda: None)
+
+
 def _enabled_state(profile: str | None = None) -> dict:
     return {
         "workspace": WS,

@@ -18,11 +18,10 @@ from ucode.managed_resolve import (
     managed_state_overrides,
     managed_supplies_models,
     managed_unservable_models,
-    managed_use_as_global_settings,
     recommended_agent,
     resolve_state,
 )
-from ucode.state import MANAGED_OVERLAY_KEY, _without_managed_overlay
+from ucode.state import MANAGED_OVERLAY_KEY
 
 WORKSPACE = "https://ws.example.com"
 
@@ -32,7 +31,6 @@ MANAGED = {
     "default_agent": "claude",
     "enabled_agents": {
         "claude": {
-            "use_as_global_settings": True,
             "model_config": {
                 "default_model": "system.ai.claude-opus-5",
                 "models": {
@@ -184,41 +182,6 @@ class TestResolveState:
         }
 
 
-class TestGlobalSettings:
-    def test_only_claude_and_codex_support_global_settings(self):
-        # This set gates both the write path AND the `ucode setup` machine-wide prompt. Adding an
-        # agent whose token can't self-refresh here would re-introduce a config that breaks in ~1h.
-        from ucode.agents import GLOBAL_SETTINGS_AGENTS
-
-        assert GLOBAL_SETTINGS_AGENTS == frozenset({"claude", "codex"})
-
-    def test_flag_true_for_opted_in_supported_agent(self):
-        assert managed_use_as_global_settings(MANAGED, "claude") is True
-
-    def test_flag_false_when_not_opted_in(self):
-        # codex is enabled but never marked machine-wide.
-        assert managed_use_as_global_settings(MANAGED, "codex") is False
-
-    def test_flag_ignored_for_unsupported_agent(self):
-        # A hand-written --from-file config can't turn it on for an agent whose token can't refresh.
-        managed = {"enabled_agents": {"gemini": {"use_as_global_settings": True}}}
-        assert managed_use_as_global_settings(managed, "gemini") is False
-
-    def test_resolve_sets_transient_write_managed_config(self):
-        resolved = resolve_state(MANAGED, _state(), "claude")
-        assert resolved["write_managed_config"] is True
-
-    def test_resolve_omits_flag_when_not_opted_in(self):
-        resolved = resolve_state(MANAGED, _state(), "codex")
-        assert "write_managed_config" not in resolved
-
-    def test_write_managed_config_is_not_persisted(self):
-        # It lives only for the config-write; save_state (via _without_managed_overlay) drops it so
-        # a later non-managed launch never writes the managed settings file.
-        resolved = resolve_state(MANAGED, _state(), "claude")
-        assert "write_managed_config" not in _without_managed_overlay(resolved)
-
-
 class TestStateFileIsNotRewritten:
     """The managed config must win by precedence, not by overwriting the developer's state file.
 
@@ -237,12 +200,13 @@ class TestStateFileIsNotRewritten:
         monkeypatch.setattr(claude, "CLAUDE_BACKUP_PATH", tmp_path / "backup.json")
         managed_settings_path = tmp_path / "managed-settings.json"
         monkeypatch.setattr(claude, "_managed_settings_path", lambda: managed_settings_path)
+        monkeypatch.setattr(claude, "managed_writes_allowed", lambda: True)
 
-        def write_managed_file(path, desired_text, *, display):
+        def reconcile_managed_file(path, desired_text, **kwargs):
             path.write_text(desired_text, encoding="utf-8")
             return "written"
 
-        monkeypatch.setattr(claude, "write_managed_file", write_managed_file)
+        monkeypatch.setattr(claude, "reconcile_managed_file", reconcile_managed_file)
         # Seed a developer whose own opus choice differs from the manifest's.
         state_mod.save_state(
             {
@@ -272,7 +236,15 @@ class TestStateFileIsNotRewritten:
     def test_settings_file_gets_the_managed_model(self, real_state_file):
         # The other half of the contract: precedence must actually reach the generated file.
         resolved_state = resolve_state(MANAGED, state_mod.load_state(), "claude")
-        claude.write_tool_config(resolved_state, None)
+        claude.write_tool_config(
+            resolved_state,
+            None,
+            coding_agent_config_defaults={
+                "opus": "system.ai.claude-opus-5",
+                "sonnet": "system.ai.claude-sonnet-4-6",
+                "haiku": "system.ai.claude-haiku-4-5",
+            },
+        )
 
         env = json.loads((real_state_file / "ucode-settings.json").read_text())["env"]
         assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"].startswith("system.ai.claude-opus-5")
@@ -411,7 +383,7 @@ class TestManagedSuppliesModels:
 
     def test_false_when_the_config_names_no_models(self):
         # Discovery still has to run, or the launch has nothing to pin.
-        managed = {"enabled_agents": {"claude": {"use_as_global_settings": True}}}
+        managed = {"enabled_agents": {"claude": {}}}
         assert managed_supplies_models(managed, "claude") is False
 
     def test_false_for_an_agent_the_config_does_not_cover(self):

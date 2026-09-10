@@ -64,7 +64,6 @@ def _full_manifest() -> dict:
         "default_agent": "claude",
         "enabled_agents": {
             "claude": {
-                "use_as_global_settings": True,
                 "custom_headers": {"x-databricks-workspace": "eng-ml-inference"},
                 "tracing_table": "main.default.claude-traces",
                 "model_config": {
@@ -76,7 +75,6 @@ def _full_manifest() -> dict:
                 },
             },
             "codex": {
-                "use_as_global_settings": False,
                 "model_config": {"default_model": "system.ai.gpt-5-6"},
             },
             "opencode": {
@@ -308,21 +306,6 @@ class TestSerialize:
         )
         assert payload["name"] == "coding-agent-configs/abc"
 
-    def test_use_as_global_settings_false_is_preserved(self):
-        # `False` is meaningful (write to the user-level file), so it must not be dropped as falsy.
-        payload = serialize_managed_config(
-            {
-                "default_agent": "codex",
-                "enabled_agents": {
-                    "codex": {
-                        "use_as_global_settings": False,
-                        "model_config": {"default_model": "m"},
-                    }
-                },
-            }
-        )
-        assert payload["enabled_agents"][0]["config"]["use_as_global_settings"] is False
-
 
 class TestModelOptions:
     def test_claude_only_sees_claude_models(self):
@@ -524,7 +507,7 @@ class TestValidate:
     def test_default_agent_needs_a_default_model(self):
         manifest = {
             "default_agent": "claude",
-            "enabled_agents": {"claude": {"use_as_global_settings": True}},
+            "enabled_agents": {"claude": {}},
         }
         errors = validate_manifest(manifest)
         assert any("model_config.default_model" in e for e in errors)

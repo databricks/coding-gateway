@@ -16,6 +16,7 @@ import json
 import shutil
 import subprocess
 
+from ucode.agent_updates import available_npm_package_update
 from ucode.config_io import ToolSpec
 from ucode.databricks import (
     get_databricks_token,
@@ -24,6 +25,7 @@ from ucode.databricks import (
     map_claude_family_models,
     resolve_provider_service,
 )
+from ucode.managed_files import managed_write_batch
 from ucode.state import get_provider_service, load_state, save_state
 from ucode.telemetry import agent_version
 from ucode.ui import (
@@ -39,6 +41,8 @@ from ucode.ui import (
 )
 
 from . import claude, codex, copilot, gemini, opencode, pi
+from .args import LaunchOptions as LaunchOptions
+from .args import explicit_model_arg_value as explicit_model_arg_value
 
 _MODULES = {
     "codex": codex,
@@ -50,6 +54,7 @@ _MODULES = {
 }
 
 TOOL_SPECS: dict[str, ToolSpec] = {name: module.SPEC for name, module in _MODULES.items()}
+
 
 # Model-routing agents ucode configures end to end. Cursor is deliberately NOT
 # here: it runs models on the user's own Cursor account, so `normalize_tool`
@@ -68,16 +73,11 @@ TOOL_ALIASES = {
 
 DEFAULT_TOOL = "codex"
 BUNDLE_VERSION = 1
-
-# Agents that can mirror ucode's managed config into the tool's NATIVE default config file, so a
-# bare `claude` / `codex` (not just `ucode <agent>`) picks up the gateway settings. This is gated by
-# the admin's `use_as_global_settings` choice in `ucode setup`. Only agents whose gateway auth
-# self-refreshes qualify: claude's `apiKeyHelper` and codex's `ucode auth-token` command both re-mint
-# tokens on their own, so the native file keeps working indefinitely. The other agents bake a
-# short-lived bearer token with no bare-launch refresher (opencode/pi/gemini) or expose no native
-# config file at all (copilot is env-var only), so they're excluded — and `ucode setup` doesn't even
-# ask them the machine-wide question.
-GLOBAL_SETTINGS_AGENTS = frozenset({"claude", "codex"})
+_MANAGED_SETTINGS_TOOLS = {"claude", "codex"}
+_NATIVE_UPGRADE_COMMANDS = {
+    "claude": ["claude", "upgrade"],
+    "codex": ["codex", "update"],
+}
 
 # ucode tool -> `databricks aitools` agent id. gemini/pi aren't supported.
 AITOOLS_AGENT_TOKENS = {
@@ -116,14 +116,18 @@ def _update_installed_tool_binary(tool: str, version: str | None = None) -> bool
     package = spec["package"]
     target = f"{package}@{version}" if version else package
 
-    if not shutil.which("npm"):
-        print_warning(f"`npm` is not available to update {spec['display']}; continuing.")
-        return False
+    if tool in _NATIVE_UPGRADE_COMMANDS and version is None and shutil.which(binary):
+        command = _NATIVE_UPGRADE_COMMANDS[tool]
+    else:
+        if not shutil.which("npm"):
+            print_warning(f"`npm` is not available to update {spec['display']}; continuing.")
+            return False
+        command = ["npm", "install", "-g", target]
 
-    print_note(f"Updating {spec['display']}...")
+    print_note(f"Upgrading {spec['display']}...")
     try:
-        subprocess.run(["npm", "install", "-g", target], check=True, timeout=300)
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        subprocess.run(command, check=True, timeout=300)
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         print_warning(f"Could not update {spec['display']}; continuing.")
         return False
 
@@ -137,23 +141,6 @@ def _minimum_version_error(tool: str) -> str | None:
     if not callable(checker):
         return None
     return checker()
-
-
-def _required_update_message(tool: str) -> str | None:
-    checker = getattr(_MODULES[tool], "required_update_message", None)
-    if not callable(checker):
-        return None
-    return checker()
-
-
-def _confirm_update_installed_tool_binary(tool: str) -> bool:
-    spec = TOOL_SPECS[tool]
-    update = _MODULES[tool].is_update_available()
-
-    if not update:
-        return False
-    current, latest = update
-    return prompt_yes_no(f"(Optional) Update {spec['display']} from {current} to {latest}?")
 
 
 def _too_new_downgrade(tool: str) -> tuple[str, str] | None:
@@ -204,19 +191,20 @@ def install_tool_binary(
         # against the gateway), so check it on every launch — not just when
         # auto-configuring — mirroring the minimum-version gate below.
         too_new = _maybe_downgrade_too_new_tool(tool, prompt=prompt_optional_updates)
-
-        if update_existing and not too_new:
-            required_update = _required_update_message(tool)
-            if required_update:
-                # Required updates are forced regardless of prompt preference;
-                # the tool won't function on an unsupported version.
-                print_warning(required_update)
-                if not _update_installed_tool_binary(tool):
-                    raise RuntimeError(_minimum_version_error(tool) or required_update)
-            elif prompt_optional_updates and _confirm_update_installed_tool_binary(tool):
-                _update_installed_tool_binary(tool)
-
         version_error = _minimum_version_error(tool)
+
+        should_update = update_existing or tool in _NATIVE_UPGRADE_COMMANDS
+        if should_update and not too_new and version_error:
+            print_warning(version_error)
+            if (
+                tool in _NATIVE_UPGRADE_COMMANDS
+                and prompt_optional_updates
+                and not prompt_yes_no(f"Upgrade {spec['display']} if available?")
+            ):
+                raise RuntimeError(version_error)
+            if not _update_installed_tool_binary(tool):
+                raise RuntimeError(version_error)
+            version_error = _minimum_version_error(tool)
         if version_error:
             raise RuntimeError(version_error)
         return True
@@ -261,6 +249,53 @@ def ensure_tool_binary_available(tool: str) -> None:
     )
 
 
+def tool_binary_installed(tool: str) -> bool:
+    """True when the agent's CLI binary is on PATH. Read-only — for ``ucode doctor``."""
+    return bool(shutil.which(TOOL_SPECS[tool]["binary"]))
+
+
+def tool_update_available(tool: str) -> tuple[str, str] | None:
+    """Return ``(current, latest)`` when a newer agent CLI is published, else None.
+    Read-only wrapper over the npm update check — for ``ucode doctor``."""
+    if tool in _NATIVE_UPGRADE_COMMANDS:
+        return None
+    checker = getattr(_MODULES[tool], "is_update_available", None)
+    if callable(checker):
+        return checker()
+    return available_npm_package_update(TOOL_SPECS[tool]["package"])
+
+
+def update_tool_binary(tool: str) -> bool:
+    """Install the latest agent CLI, returning True on success. Public entry
+    point over the internal updater so ``ucode doctor`` can apply the fix."""
+    return _update_installed_tool_binary(tool)
+
+
+def tool_uses_native_updater(tool: str) -> bool:
+    """Whether upgrades are resolved and installed entirely by the agent CLI."""
+    return tool in _NATIVE_UPGRADE_COMMANDS
+
+
+def tool_version_error(tool: str) -> str | None:
+    """Return an active minimum-version blocker for a configured agent."""
+    return _minimum_version_error(tool)
+
+
+def tracing_mlflow_ok() -> bool:
+    """True when the `mlflow` CLI that Claude tracing needs is installed and in
+    the supported version range. Read-only — for ``ucode doctor``."""
+    current = claude._installed_mlflow_version()
+    return bool(
+        current and claude.MINIMUM_MLFLOW_VERSION <= current < claude.MAXIMUM_MLFLOW_VERSION
+    )
+
+
+def ensure_tracing_mlflow_cli() -> bool:
+    """Install/repair the pinned `mlflow` CLI for Claude tracing, returning True
+    on success. Public entry point so ``ucode doctor`` can apply the fix."""
+    return claude._ensure_mlflow_cli()
+
+
 def ensure_bootstrap_dependencies(
     tool: str,
     *,
@@ -286,7 +321,8 @@ def resolve_launch_model(
     explicit_model: str | None,
 ) -> tuple[dict, str | None]:
     model = explicit_model or default_model_for_tool(tool, state)
-    if not model:
+    # if model is not specified for codex, then launch with harness's default model.
+    if not model and tool != "codex":
         raise RuntimeError(
             f"No models available for {tool}. Run `ucode configure` to set up your workspace."
         )
@@ -323,7 +359,61 @@ def resolve_provider_models(
     # model selection server-side for that tier, so there's nothing to reconcile.
     if relayed:
         return None, None, relayed
+    # Only Claude pins per-family model ids. Codex ignores this map, and gemini resolves
+    # its target through resolve_gemini_provider_model instead — so mapping their targets
+    # through Claude-family logic would be meaningless (see docstring).
+    if tool != "claude":
+        return None, None, relayed
     return map_claude_family_models(service.get("targets") or []) or None, None, relayed
+
+
+def resolve_gemini_provider_model(
+    state: dict,
+    provider: str,
+    explicit_model: str | None,
+    *,
+    service: dict | None = None,
+) -> tuple[str | None, str | None]:
+    """Pick the Gemini model to pin for a provider-service launch.
+
+    A Gemini Enterprise service routes by header but the request still names a
+    concrete model in the URL, so one of the service's declared targets must be
+    pinned. In precedence order: ``explicit_model`` (from ``--model``) when it
+    names a target; the model already pinned in the env file when it is still a
+    target (so a bare relaunch or reconfigure needn't re-pass ``--model``); the
+    sole target when the service declares exactly one; otherwise ask the user to
+    choose. Returns ``(model, error)``.
+
+    Pass ``service`` to reuse an already-fetched service dict and skip the
+    control-plane lookup (the launch/configure paths hold one).
+    """
+    if service is None:
+        token = get_databricks_token(state["workspace"], state.get("profile"))
+        service, error = resolve_provider_service("gemini", provider, state["workspace"], token)
+        if error or service is None:
+            return None, error or f"Model provider service '{provider}' was not found."
+    targets = [t for t in (service.get("targets") or []) if isinstance(t, str) and t]
+    if explicit_model:
+        if explicit_model in targets:
+            return explicit_model, None
+        available = ", ".join(targets) or "none"
+        return None, (
+            f"Model '{explicit_model}' is not a target of provider service '{provider}'. "
+            f"Available: {available}."
+        )
+    if not targets:
+        return None, f"Provider service '{provider}' exposes no models to launch."
+    # Reuse a previously pinned target so a bare relaunch/reconfigure keeps working without
+    # --model — but only when it is still one of the service's declared targets.
+    persisted = gemini.persisted_provider_model()
+    if persisted in targets:
+        return persisted, None
+    if len(targets) == 1:
+        return targets[0], None
+    return None, (
+        f"Provider service '{provider}' exposes several models "
+        f"({', '.join(targets)}); pass --model to choose one."
+    )
 
 
 def configure_tool(
@@ -335,6 +425,7 @@ def configure_tool(
     relayed: bool = False,
     route_root_model: str | None = None,
     custom_model: str | None = None,
+    coding_agent_config_defaults: dict[str, str] | None = None,
 ) -> dict:
     result: dict | tuple[dict, str]
     if tool == "codex":
@@ -342,8 +433,7 @@ def configure_tool(
     elif tool == "claude":
         # A Model Provider Service routes by header and pins no Databricks
         # model, so the usual "model required" guard doesn't apply to claude.
-        # `custom_model` (from `ucode claude --model`) likewise supplies the model.
-        if not model and not provider and not custom_model:
+        if not model and not provider:
             raise RuntimeError(f"A {tool} model must be selected before configuration.")
         result = claude.write_tool_config(
             state,
@@ -353,13 +443,15 @@ def configure_tool(
             relayed=relayed,
             route_root_model=route_root_model,
             custom_model=custom_model,
+            coding_agent_config_defaults=coding_agent_config_defaults,
         )
     else:
-        # provider routing is claude/codex-only; every other tool needs a model.
+        # Every tool in this branch needs a model — including gemini under a provider,
+        # which still pins the service's target model in the URL.
         if not model:
             raise RuntimeError(f"A {tool} model must be selected before configuration.")
         if tool == "gemini":
-            result = gemini.write_tool_config(state, model)
+            result = gemini.write_tool_config(state, model, provider=provider)
         elif tool == "copilot":
             result = copilot.write_tool_config(state, model)
         elif tool == "pi":
@@ -372,8 +464,14 @@ def configure_tool(
     return result
 
 
-def launch(tool: str, state: dict, tool_args: list[str]) -> None:
-    _MODULES[tool].launch(state, tool_args)
+def launch(
+    tool: str,
+    state: dict,
+    tool_args: list[str],
+    *,
+    options: LaunchOptions,
+) -> None:
+    _MODULES[tool].launch(state, tool_args, options=options)
 
 
 def check_gateway_endpoint(state: dict, tool: str) -> bool:
@@ -431,7 +529,8 @@ def configure_single_tool(tool: str, state: dict) -> dict:
             raise RuntimeError(
                 f"{TOOL_SPECS[tool]['display']} is not available on this workspace.{detail}"
             )
-    state = _configure_one(tool, state, provider)
+    with managed_write_batch(_managed_settings_displays([tool])):
+        state = _configure_one(tool, state, provider)
     available_tools = list(set((state.get("available_tools") or []) + [tool]))
     state["available_tools"] = available_tools
     save_state(state)
@@ -441,6 +540,14 @@ def configure_single_tool(tool: str, state: dict) -> dict:
 def _configure_one(tool: str, state: dict, provider: str | None) -> dict:
     """Write one tool's config, routing through ``provider`` when set."""
     if provider:
+        if tool == "gemini":
+            # Gemini pins a concrete target in the URL, so configure must resolve one now —
+            # unlike claude/codex, its config writer requires a model. This also validates the
+            # service in a single lookup (no resolve_provider_models family map for gemini).
+            model, error = resolve_gemini_provider_model(state, provider, None)
+            if error:
+                raise RuntimeError(error)
+            return configure_tool(tool, state, model, provider=provider)
         provider_models, error, relayed = resolve_provider_models(tool, state, provider)
         if error:
             raise RuntimeError(error)
@@ -453,7 +560,9 @@ def _configure_one(tool: str, state: dict, provider: str | None) -> dict:
     return configure_tool(tool, state, model)
 
 
-def configure_selected_tools(state: dict, tools: list[str]) -> dict:
+def configure_selected_tools(
+    state: dict, tools: list[str], *, install_ai_tools: bool = True
+) -> dict:
     """Configure the given tools. Caller is responsible for ensuring each tool
     is available on the workspace.
 
@@ -461,14 +570,20 @@ def configure_selected_tools(state: dict, tools: list[str]) -> dict:
     replacing it, so a previously-configured tool the user didn't pick this
     run is preserved.
     """
-    for tool in tools:
-        state = _configure_one(tool, state, get_provider_service(state, tool))
+    with managed_write_batch(_managed_settings_displays(tools)):
+        for tool in tools:
+            state = _configure_one(tool, state, get_provider_service(state, tool))
 
     existing = state.get("available_tools") or []
     state["available_tools"] = sorted(set(existing) | set(tools))
     save_state(state)
-    install_databricks_ai_tools_for_agents(tools, state)
+    if install_ai_tools:
+        install_databricks_ai_tools_for_agents(tools, state)
     return state
+
+
+def _managed_settings_displays(tools: list[str]) -> list[str]:
+    return [TOOL_SPECS[tool]["display"] for tool in tools if tool in _MANAGED_SETTINGS_TOOLS]
 
 
 def configure_all_tools(state: dict) -> dict:

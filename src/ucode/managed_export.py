@@ -40,8 +40,8 @@ def build_export_payload() -> dict:
     manifest = load_managed_state(workspace)
     if not manifest:
         raise RuntimeError(
-            "No managed coding-agent config found locally. Run `ucode setup` to author one, or run "
-            "`ucode` against a workspace that publishes one, then re-run `ucode export`."
+            "No managed coding-agent config found locally. Run `ug setup` to author one, or run "
+            "`ug` against a workspace that publishes one, then re-run `ug export`."
         )
     errors = validate_manifest(manifest, None)
     if errors:

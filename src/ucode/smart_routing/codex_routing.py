@@ -1,7 +1,7 @@
 """Databricks AI Gateway routing helpers for Codex sessions and subagents.
 
 Codex-specific configuration on top of the shared :mod:`ucode.smart_routing.routing`
-core: the workspace-backed ``task_v1`` route options, the ``spawn_agent`` tool
+core: the workspace-backed route options, the ``spawn_agent`` tool
 detector, the Codex model-id translation, and the artifact paths.
 """
 
@@ -18,9 +18,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ucode.config_io import APP_DIR
-from ucode.databricks import get_databricks_token
 from ucode.smart_routing import routing
-from ucode.smart_routing.codex_hooks import routing_models
 from ucode.smart_routing.routing import RoutingDecision
 
 ROUTER_NAME = routing.ROUTER_NAME
@@ -36,66 +34,6 @@ _GPT_RE = re.compile(r"gpt-(\d+)(?:[.-](\d+))?(?:[.-](\d+))?(-.+|[a-z].*)?")
 _normalize_model = routing.normalize_model
 
 
-def route_launch_model(state: dict, tool_args: list[str]):
-    """Route a root Codex launch on the launch-time prompt, if there is one.
-
-    Returns (None, None) when the launch carries no prompt (a bare interactive
-    session): with no task signal the router can only return its floor arm, so
-    routing would just add a round-trip and silently override the user's default
-    model. In that case we don't route and keep the configured default. Routing
-    on a typed-in first prompt is out of scope — no hook/MCP can retarget the
-    root model once the session is running.
-    """
-    task = _launch_routing_task(tool_args)
-    if task is None:
-        return None, None
-    workspace = state.get("workspace")
-    models = routing_models(state)
-    if not isinstance(workspace, str) or not models:
-        return None, "workspace model metadata is unavailable"
-    try:
-        token = get_databricks_token(workspace, state.get("profile"))
-    except RuntimeError as exc:
-        return None, f"could not authenticate the routing request: {exc}"
-    return request_routing_decision(workspace, token, task, models)
-
-
-# Codex CLI options that consume a following value (from `codex --help`); their
-# values must not be mistaken for the seed prompt when parsing launch args.
-_CODEX_VALUE_OPTIONS = frozenset(
-    {
-        "-c",
-        "--config",
-        "-i",
-        "--image",
-        "-m",
-        "--model",
-        "-p",
-        "--profile",
-        "-s",
-        "--sandbox",
-        "-a",
-        "--ask-for-approval",
-        "-C",
-        "--cd",
-        "--add-dir",
-        "--enable",
-        "--disable",
-        "--local-provider",
-        "--remote",
-        "--remote-auth-token-env",
-    }
-)
-
-
-def _launch_routing_task(tool_args: list[str]) -> str | None:
-    # The routing task is the user's real first prompt when it's on the command
-    # line (`codex "<prompt>"`, `codex exec "<prompt>"`, or after `--`). A bare
-    # interactive launch has no prompt yet → None, and the caller skips routing
-    # (the root model can't be re-routed once the TUI is running).
-    return routing.extract_seed_prompt(tool_args, _CODEX_VALUE_OPTIONS)
-
-
 def request_routing_decision(
     workspace: str,
     token: str,
@@ -105,18 +43,19 @@ def request_routing_decision(
     timeout: float = REQUEST_TIMEOUT_S,
     log: Callable[[str], None] | None = None,
 ) -> tuple[RoutingDecision | None, str | None]:
-    """Ask the workspace ``task_v1`` router for a servable Codex model."""
+    """Ask the router for a servable Codex model."""
     available = {_normalize_model(model): model for model in available_models}
     route_options = [(model, "codex") for model in available]
     if not route_options:
         return None, "no cached model services are available"
+    router_name = routing.configured_router_name()
     if log is not None:
         payload = {
             "route_options": [
                 {"model": model, "harness": harness} for model, harness in route_options
             ],
             "task": {"prompt": task},
-            "route_selector": {"router_name": ROUTER_NAME},
+            "route_selector": {"router_name": router_name},
         }
         url = workspace.rstrip("/") + ROUTING_PATH
         log(f"[ROUTE] request POST {url}: {json.dumps(payload, separators=(',', ':'))}")
@@ -126,12 +65,13 @@ def request_routing_decision(
         task,
         route_options,
         lambda raw_model: available.get(_normalize_model(raw_model)),
+        router_name=router_name,
         timeout=timeout,
     )
 
 
 def resolve_routed_model(raw_model: str, available_models: list[str]) -> str | None:
-    """Map a ``task_v1`` arm to a model the configured workspace can serve."""
+    """Map a router arm to a model the configured workspace can serve."""
     normalized = {_normalize_model(model): model for model in available_models}
     return normalized.get(_normalize_model(raw_model))
 
@@ -159,7 +99,7 @@ def route_pre_tool_use(
             workspace, token, task, available_models, timeout=timeout
         ),
         default_task_label="Codex subagent task",
-        model_id_mapper=_codex_model_id,
+        model_id_mapper=codex_model_id,
         record_decision=record,
     )
 
@@ -203,7 +143,13 @@ def _model_strength(model: str) -> tuple[int, int, int, int]:
     return major, minor, patch, 1 if not suffix else 0
 
 
-def _codex_model_id(model: str) -> str:
+def codex_model_id(model: str) -> str:
+    """Map a UC GPT service ID to Codex's bundled catalog slug.
+
+    Codex's bundled GPT catalog owns the model metadata for these aliases,
+    while the AI Gateway resolves them back to the matching ``system.ai`` service.
+    Leave non-GPT models unchanged because their metadata comes from the gateway catalog.
+    """
     tail = model.rsplit("/", 1)[-1]
     if tail in {"databricks-gpt-5-2-codex", "databricks-gpt-5-4-nano"}:
         return tail

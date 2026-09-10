@@ -1,7 +1,7 @@
 """Shared AI Gateway routing helpers for coding-agent sessions and subagents.
 
 Both the Codex and Claude Code integrations route through the workspace's
-``task_v1`` router at ``/ai-gateway/routing/v1/routes:select``. The
+configured router at ``/ai-gateway/routing/v1/routes:select``. The
 harness-agnostic mechanics live here — the gateway call, the decision shape,
 model-name normalization, and the canary/audit/decision bookkeeping. Each
 harness module (``codex_routing`` / ``claude_routing``) supplies its own route
@@ -11,6 +11,7 @@ arms, spawn-tool detector, model-id translation, and artifact paths.
 from __future__ import annotations
 
 import json
+import os
 import time
 import urllib.error
 import urllib.request
@@ -20,7 +21,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-ROUTER_NAME = "task_v1"
+ROUTER_NAME = "task_v2"
+ROUTER_NAME_ENV_VAR = "SMART_ROUTER_NAME"
 ROUTING_PATH = "/ai-gateway/routing/v1/routes:select"
 REQUEST_TIMEOUT_S = 30.0
 SUBAGENT_ROUTING_DISCLAIMER = (
@@ -97,58 +99,9 @@ def normalize_model(model: str) -> str:
     return tail.lower()
 
 
-def extract_seed_prompt(tool_args: list[str], value_options: frozenset[str]) -> str | None:
-    """Recover a launch-time seed prompt from the passthrough CLI args.
-
-    A coding agent launched as ``<tool> [OPTIONS] [PROMPT]`` (or with an explicit
-    ``exec <PROMPT>`` subcommand) may carry the user's first prompt on the command
-    line. When it does, routing the root-session model on that real prompt beats
-    the generic placeholder. Everything after a ``--`` separator is treated as
-    positional (the agent's own convention for "stop parsing flags").
-
-    ``value_options`` is the set of the tool's flags that consume a following
-    value (e.g. ``-m``/``--model``); their values are skipped so a flag argument
-    is never mistaken for the prompt. Returns the joined positional tokens, or
-    None when the args carry no unambiguous prompt (bare launch, or only flags) —
-    the caller then falls back to its placeholder task.
-
-    Conservative by design: an unrecognized ``--flag`` (not in ``value_options``)
-    is treated as a boolean and skipped, and ``--flag=value`` forms are skipped
-    whole. We only return text we are confident is the user's prompt.
-    """
-    if "exec" in tool_args:
-        after = tool_args[tool_args.index("exec") + 1 :]
-        positionals = _positional_args(after, value_options)
-        return " ".join(positionals) if positionals else None
-    positionals = _positional_args(tool_args, value_options)
-    return " ".join(positionals) if positionals else None
-
-
-def _positional_args(args: list[str], value_options: frozenset[str]) -> list[str]:
-    positionals: list[str] = []
-    i = 0
-    seen_double_dash = False
-    while i < len(args):
-        arg = args[i]
-        if seen_double_dash:
-            positionals.append(arg)
-            i += 1
-            continue
-        if arg == "--":
-            seen_double_dash = True
-            i += 1
-            continue
-        if arg.startswith("-") and arg != "-":
-            # `--opt=value` carries its own value; a bare option in value_options
-            # consumes the next token. Anything else is a boolean flag we skip.
-            if "=" not in arg and arg in value_options:
-                i += 2
-            else:
-                i += 1
-            continue
-        positionals.append(arg)
-        i += 1
-    return positionals
+def configured_router_name() -> str:
+    """Return the environment-selected router, falling back to ``task_v2``."""
+    return os.environ.get(ROUTER_NAME_ENV_VAR, "").strip() or ROUTER_NAME
 
 
 def select_route(
@@ -158,7 +111,7 @@ def select_route(
     route_options: Iterable[tuple[str, str | None]],
     resolve: Callable[[str], str | None],
     *,
-    router_name: str = ROUTER_NAME,
+    router_name: str,
     timeout: float = REQUEST_TIMEOUT_S,
 ) -> tuple[RoutingDecision | None, str | None]:
     """POST one ``routes:select`` request and resolve the router's pick.

@@ -35,6 +35,7 @@ from ucode.ui import (
     print_heading,
     print_note,
     print_warning,
+    prompt_for_selection,
     prompt_yes_no_default,
     render_box_table,
     spinner,
@@ -503,7 +504,13 @@ class ToolUsageTotals(NamedTuple):
     cost: Decimal | None
 
 
-TOOL_MODEL_TABLE_HEADERS = ["Model", "Requests", "Input (incl. cache)", "Output", "Cost (USD)"]
+TOOL_MODEL_TABLE_HEADERS = [
+    "Model",
+    "Requests",
+    "Input (incl. cache)",
+    "Output",
+    "Est. Cost (USD)",
+]
 
 
 def aggregate_tool_model_usage(records: list[dict[str, object]], tool: str) -> list[ModelUsage]:
@@ -636,24 +643,32 @@ def render_usage_summary(
         if usage_day == today:
             daily_total += token_total
 
+    today_text = format_token_count(daily_total)
+    weekly_text = format_token_count(weekly_total)
+    monthly_text = format_token_count(monthly_total)
+    token_table = render_box_table(
+        ["Today", "Last 7 days", "Last 30 days"],
+        [[f"{today_text} tokens", f"{weekly_text} tokens", f"{monthly_text} tokens"]],
+    )
+    for token_text in {today_text, weekly_text, monthly_text}:
+        plain_value = f"{token_text} tokens"
+        token_table = token_table.replace(plain_value, value(plain_value))
     lines = [
         heading(f"Usage Summary for {requester_name}"),
         "",
-        "[bold green]✓[/bold green] Databricks AI Gateway usage",
-        f"{label('Today:')} {value(format_token_count(daily_total) + ' tokens')}",
-        f"{label('Last 7 days:')} {value(format_token_count(weekly_total) + ' tokens')}",
-        f"{label('Last 30 days:')} {value(format_token_count(monthly_total) + ' tokens')}",
+        "[bold green]✓[/bold green]  [bold]Databricks AI Gateway Token Usage[/bold]",
+        token_table,
     ]
     if active_tools_last_week:
-        tool_text = ", ".join(tool_displays[tool] for tool in active_tools_last_week)
-        lines.append(f"{label('Active tools:')} {value(tool_text)}")
+        tool_text = " · ".join(tool_displays[tool] for tool in active_tools_last_week)
+        lines.extend(["", f"   🤖  {label('Top Harnesses:')} {value(tool_text)}"])
     if weekly_model_usage:
         top_models = sorted(
             weekly_model_usage.values(),
             key=lambda u: (-u.total, u.name.lower()),
         )[:3]
-        models_text = ", ".join(usage.name for usage in top_models)
-        lines.append(f"{label('Top models this week:')} {value(models_text)}")
+        models_text = " · ".join(usage.name for usage in top_models)
+        lines.append(f"   ⭐  {label('Top Models:')} {value(models_text)}")
         weekly_cost = sum(
             (
                 model_usage_cost(usage, price_lookup) or Decimal(0)
@@ -662,7 +677,10 @@ def render_usage_summary(
             Decimal(0),
         )
         if weekly_cost > 0:
-            lines.append(f"{label('Est. cost (7 days):')} {value(format_cost_usd(weekly_cost))}")
+            lines.append(
+                f"   💰  {label('Estimated Cost for Last 7 Days:')} "
+                f"{value(format_cost_usd(weekly_cost))}"
+            )
     lines.extend(render_budget_lines(budget_spend))
     return "\n".join(lines)
 
@@ -689,6 +707,49 @@ def run_query_on_first_working_warehouse(
             print_warning(f"SQL warehouse `{warehouse.label}` is unusable: {exc}")
             continue
         return warehouse.http_path, columns, rows
+    raise last_error or RuntimeError("No SQL warehouse could run the usage query.")
+
+
+def select_sql_warehouse(candidates: list[SqlWarehouse]) -> SqlWarehouse | None:
+    """Ask which discovered warehouse should run the detailed usage query."""
+    selected_path = prompt_for_selection(
+        "Select a SQL warehouse for the usage query:",
+        [
+            (warehouse.http_path, f"{warehouse.label} ({warehouse.state})")
+            for warehouse in candidates
+        ],
+    )
+    return next(
+        (warehouse for warehouse in candidates if warehouse.http_path == selected_path),
+        None,
+    )
+
+
+def select_and_run_usage_query(
+    workspace: str,
+    token: str,
+    candidates: list[SqlWarehouse],
+    query: str,
+) -> tuple[str, list[str], list[tuple]] | None:
+    """Let the user choose warehouses until one runs the query or they cancel.
+
+    A failed warehouse is removed before the picker is shown again so the user cannot
+    accidentally retry the same unusable option forever. Returns ``None`` when the picker
+    is cancelled and raises the final warehouse error when no candidates remain.
+    """
+    remaining = list(candidates)
+    last_error: RuntimeError | None = None
+    while remaining:
+        selected = select_sql_warehouse(remaining)
+        if selected is None:
+            return None
+        try:
+            return run_query_on_first_working_warehouse(workspace, token, [selected], query)
+        except RuntimeError as exc:
+            last_error = exc
+            remaining = [
+                warehouse for warehouse in remaining if warehouse.http_path != selected.http_path
+            ]
     raise last_error or RuntimeError("No SQL warehouse could run the usage query.")
 
 
@@ -736,7 +797,10 @@ def usage(warehouse_id: str | None = None) -> int:
     if budget_lines:
         console.print("\n".join([heading("Usage Budget"), "", *budget_lines]))
     else:
-        print_note("Budget spend and threshold are unavailable.")
+        print_note(
+            "Budget spend and threshold are unavailable. "
+            "Please configure a coding agent budget policy first."
+        )
 
     if not prompt_yes_no_default(
         "Show token usage and estimated cost details? This queries a SQL warehouse.",
@@ -746,10 +810,18 @@ def usage(warehouse_id: str | None = None) -> int:
 
     with spinner("Discovering SQL warehouse..."):
         candidates = discover_sql_warehouses(workspace, token, warehouse_id=warehouse_id)
-
-    resolved_http_path, columns, rows = run_query_on_first_working_warehouse(
-        workspace, token, candidates, build_usage_report_query()
-    )
+    if warehouse_id is None:
+        query_result = select_and_run_usage_query(
+            workspace, token, candidates, build_usage_report_query()
+        )
+        if query_result is None:
+            print_note("Usage details cancelled.")
+            return 0
+        resolved_http_path, columns, rows = query_result
+    else:
+        resolved_http_path, columns, rows = run_query_on_first_working_warehouse(
+            workspace, token, candidates, build_usage_report_query()
+        )
     records = parse_usage_rows(columns, rows)
     requester_name = find_requester_name(workspace, resolved_http_path, token, records)
 
@@ -793,6 +865,6 @@ def usage(warehouse_id: str | None = None) -> int:
         console.print(f"{label('Requests:')} {value(f'{totals.requests:,}')}")
         console.print(f"{label('Total tokens:')} {value(f'{totals.tokens:,}')}")
         if totals.cost is not None:
-            console.print(f"{label('Cost (USD):')} {value(format_cost_usd(totals.cost))}")
+            console.print(f"{label('Est. Cost (USD):')} {value(format_cost_usd(totals.cost))}")
         console.print(render_box_table(TOOL_MODEL_TABLE_HEADERS, rows, max_widths=table_widths))
     return 0

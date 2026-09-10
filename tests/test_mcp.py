@@ -2336,9 +2336,15 @@ def _find_skills(servers):
     return [s for s in servers if s.get("kind") == mcp.SKILLS_MCP_KIND]
 
 
+def _by_client(clients, locations):
+    return {client: list(locations) for client in clients}
+
+
 class TestResolveSkillsMcpServers:
     def test_builds_single_canonical_entry(self):
-        servers = mcp._resolve_skills_mcp_servers(WS, ["claude"], ["main.default"], [])
+        servers = mcp._resolve_skills_mcp_servers(
+            WS, ["claude"], _by_client(["claude"], ["main.default"]), []
+        )
         assert _find_skills(servers) == servers
         entry = servers[0]
         assert entry["name"] == mcp.SKILLS_MCP_SERVER_NAME
@@ -2364,7 +2370,7 @@ class TestResolveSkillsMcpServers:
             "clients": ["codex"],
         }
         servers = mcp._resolve_skills_mcp_servers(
-            WS, ["claude"], ["a.b"], [service_entry, stale_skills]
+            WS, ["claude"], _by_client(["claude"], ["a.b"]), [service_entry, stale_skills]
         )
         assert service_entry in servers
         skills = _find_skills(servers)
@@ -2378,7 +2384,9 @@ class TestResolveSkillsMcpServers:
             "url": f"{WS}/ai-gateway/skills/",
             "clients": ["claude"],
         }
-        servers = mcp._resolve_skills_mcp_servers(WS, ["claude"], ["a.b"], [old_named])
+        servers = mcp._resolve_skills_mcp_servers(
+            WS, ["claude"], _by_client(["claude"], ["a.b"]), [old_named]
+        )
         assert len(servers) == 1
         assert servers[0]["kind"] == mcp.SKILLS_MCP_KIND
 
@@ -2390,7 +2398,9 @@ class TestResolveSkillsMcpServers:
             "url": f"{WS}/ai-gateway/skills/?schema=stale.value",
             "clients": ["claude"],
         }
-        servers = mcp._resolve_skills_mcp_servers(WS, ["claude"], ["new.two"], [stale])
+        servers = mcp._resolve_skills_mcp_servers(
+            WS, ["claude"], _by_client(["claude"], ["new.two"]), [stale]
+        )
         assert servers[0]["url"] == f"{WS}/ai-gateway/skills/?schema=new.two"
 
     def test_empty_locations_yields_bare_route(self):
@@ -2439,7 +2449,9 @@ class TestConfigureSkillsMcpCommand:
 
     def test_location_replaces_prior_set(self, monkeypatch):
         saved_states: list[dict] = []
-        prior = mcp._resolve_skills_mcp_servers(WS, ["claude"], ["A.a", "B.b"], [])
+        prior = mcp._resolve_skills_mcp_servers(
+            WS, ["claude"], _by_client(["claude"], ["A.a", "B.b"]), []
+        )
         _stub_location_base(monkeypatch, _skills_state(prior))
         monkeypatch.setattr(mcp, "configure_client_mcp_server", lambda *a, **kw: [])
         monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
@@ -2450,7 +2462,7 @@ class TestConfigureSkillsMcpCommand:
 
     def test_multiple_locations_set_in_order(self, monkeypatch):
         saved_states: list[dict] = []
-        prior = mcp._resolve_skills_mcp_servers(WS, ["claude"], ["A.a"], [])
+        prior = mcp._resolve_skills_mcp_servers(WS, ["claude"], _by_client(["claude"], ["A.a"]), [])
         _stub_location_base(monkeypatch, _skills_state(prior))
         monkeypatch.setattr(mcp, "configure_client_mcp_server", lambda *a, **kw: [])
         monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
@@ -2458,6 +2470,21 @@ class TestConfigureSkillsMcpCommand:
         assert mcp.configure_skills_mcp_command(["X.x", "Y.y"]) == 0
 
         assert _find_skills(saved_states[-1]["mcp_servers"])[0]["skill_locations"] == ["X.x", "Y.y"]
+
+    def test_replaces_scope_for_configured_clients_only(self, monkeypatch):
+        saved_states: list[dict] = []
+        prior = mcp._resolve_skills_mcp_servers(
+            WS, ["claude", "codex"], {"claude": ["claude.old"], "codex": ["codex.kept"]}, []
+        )
+        _stub_location_base(monkeypatch, _skills_state(prior))
+        monkeypatch.setattr(mcp, "configure_client_mcp_server", lambda *a, **kw: [])
+        monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
+
+        assert mcp.configure_skills_mcp_command(["new.default"]) == 0
+
+        entry = _find_skills(saved_states[-1]["mcp_servers"])[0]
+        assert mcp.skill_locations_for_client(entry, "claude") == ["new.default"]
+        assert mcp.skill_locations_for_client(entry, "codex") == ["codex.kept"]
 
     def test_preserves_mcp_service_entries_across_set(self, monkeypatch):
         saved_states: list[dict] = []
@@ -2467,7 +2494,9 @@ class TestConfigureSkillsMcpCommand:
             "auth": "env:OAUTH_TOKEN",
             "clients": ["claude"],
         }
-        prior = mcp._resolve_skills_mcp_servers(WS, ["claude"], ["A.a"], [service_entry])
+        prior = mcp._resolve_skills_mcp_servers(
+            WS, ["claude"], _by_client(["claude"], ["A.a"]), [service_entry]
+        )
         _stub_location_base(monkeypatch, _skills_state(prior))
         monkeypatch.setattr(mcp, "configure_client_mcp_server", lambda *a, **kw: [])
         monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
@@ -2481,12 +2510,46 @@ class TestConfigureSkillsMcpCommand:
 
 class TestSkillMcpLocations:
     def test_reads_locations_off_skills_entry(self):
-        state = _skills_state(mcp._resolve_skills_mcp_servers(WS, ["claude"], ["A.a", "B.b"], []))
+        state = _skills_state(
+            mcp._resolve_skills_mcp_servers(
+                WS, ["claude"], _by_client(["claude"], ["A.a", "B.b"]), []
+            )
+        )
         assert mcp._skill_mcp_locations(state) == ["A.a", "B.b"]
 
     def test_empty_when_no_skills_entry(self):
         assert mcp._skill_mcp_locations(_skills_state([])) == []
         assert mcp._skill_mcp_locations(_skills_state()) == []
+
+    def test_ignores_malformed_default_locations(self):
+        entry = {"kind": mcp.SKILLS_MCP_KIND, "skill_locations": "not-a-list"}
+        state = _skills_state([entry])
+
+        assert mcp._skill_mcp_locations(state) == []
+        assert mcp.skill_locations_for_client(entry, "claude") == []
+
+    def test_per_client_scopes_are_independent(self):
+        entry = mcp._build_skills_entry(
+            WS,
+            {"claude": ["common.schema", "claude.only"], "codex": ["common.schema"]},
+            ["claude", "codex"],
+        )
+
+        assert mcp.skill_locations_for_client(entry, "claude") == [
+            "common.schema",
+            "claude.only",
+        ]
+        assert mcp.skill_locations_for_client(entry, "codex") == ["common.schema"]
+
+    def test_legacy_flat_scope_mirrors_to_every_client(self):
+        entry = {
+            "kind": mcp.SKILLS_MCP_KIND,
+            "skill_locations": ["a.b", "c.d"],
+            "clients": ["claude", "codex"],
+        }
+
+        assert mcp.skill_locations_for_client(entry, "claude") == ["a.b", "c.d"]
+        assert mcp.skill_locations_for_client(entry, "codex") == ["a.b", "c.d"]
 
 
 class TestUnionLocations:
@@ -2508,7 +2571,9 @@ class TestAddSkillsCommand:
     than replacing it (unlike `configure_skills_mcp_command`)."""
 
     def test_unions_into_existing_scope(self, monkeypatch):
-        state = _skills_state(mcp._resolve_skills_mcp_servers(WS, ["claude"], ["A.a"], []))
+        state = _skills_state(
+            mcp._resolve_skills_mcp_servers(WS, ["claude"], _by_client(["claude"], ["A.a"]), [])
+        )
         _stub_location_base(monkeypatch, state)
         monkeypatch.setattr(mcp, "configure_client_mcp_server", lambda *a, **kw: [])
         monkeypatch.setattr(mcp, "save_state", lambda s: None)
@@ -2518,7 +2583,11 @@ class TestAddSkillsCommand:
         assert _find_skills(state["mcp_servers"])[0]["skill_locations"] == ["A.a", "B.b"]
 
     def test_existing_schema_leaves_scope_unchanged(self, monkeypatch):
-        state = _skills_state(mcp._resolve_skills_mcp_servers(WS, ["claude"], ["A.a", "B.b"], []))
+        state = _skills_state(
+            mcp._resolve_skills_mcp_servers(
+                WS, ["claude"], _by_client(["claude"], ["A.a", "B.b"]), []
+            )
+        )
         _stub_location_base(monkeypatch, state)
         monkeypatch.setattr(mcp, "configure_client_mcp_server", lambda *a, **kw: [])
         monkeypatch.setattr(mcp, "save_state", lambda s: None)
@@ -2559,7 +2628,9 @@ class TestRegisterSchemalessSkillsConnection:
 
     def test_preserves_prior_mcp_location_set(self, monkeypatch):
         self._stub(monkeypatch)
-        prior = mcp._resolve_skills_mcp_servers(WS, ["claude"], ["X.x", "Y.y"], [])
+        prior = mcp._resolve_skills_mcp_servers(
+            WS, ["claude"], _by_client(["claude"], ["X.x", "Y.y"]), []
+        )
         state = _skills_state(prior)
 
         mcp.register_schemaless_skills_connection(state, WS, None, ["claude"])
@@ -2584,7 +2655,8 @@ class TestSkillsToolsDescription:
 
 class TestPrintSkillsSummary:
     def _entry(self, locations):
-        return mcp._resolve_skills_mcp_servers(WS, ["claude", "codex"], locations, [])[0]
+        clients = ["claude", "codex"]
+        return mcp._resolve_skills_mcp_servers(WS, clients, _by_client(clients, locations), [])[0]
 
     def test_reports_scoped_connection(self, capsys):
         mcp._print_skills_summary(self._entry(["main.default"]))
@@ -2667,7 +2739,9 @@ class TestRevertMcpConfigs:
         )
         monkeypatch.setattr(mcp, "restore_file", lambda *a, **kw: False)
 
-        skills_entry = mcp._resolve_skills_mcp_servers(WS, ["claude", "codex"], ["a.b"], [])[0]
+        skills_entry = mcp._resolve_skills_mcp_servers(
+            WS, ["claude", "codex"], _by_client(["claude", "codex"], ["a.b"]), []
+        )[0]
         mcp.revert_mcp_configs({"mcp_servers": [skills_entry]})
 
         assert removed == [
@@ -2681,7 +2755,9 @@ class TestPurgeCrossWorkspaceSkillsEntry:
         removed: list[tuple[str, str]] = []
         saved_states: list[dict] = []
         foreign = "https://other.databricks.com"
-        skills_entry = mcp._resolve_skills_mcp_servers(foreign, ["claude"], ["a.b"], [])[0]
+        skills_entry = mcp._resolve_skills_mcp_servers(
+            foreign, ["claude"], _by_client(["claude"], ["a.b"]), []
+        )[0]
         # The skills URL carries a `?schema=` query; its host must still parse.
         assert mcp._mcp_entry_url_host(skills_entry) == "other.databricks.com"
         state = {"mcp_servers": [skills_entry]}

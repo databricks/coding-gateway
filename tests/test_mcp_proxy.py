@@ -230,7 +230,7 @@ def test_run_uses_mcp_http_defaults(monkeypatch):
         yield
 
     monkeypatch.setattr(httpx_module, "AsyncClient", CapturingClient)
-    monkeypatch.setattr(mcp_proxy, "_build_token_auth", lambda *args: object())
+    monkeypatch.setattr(mcp_proxy, "_build_token_auth", lambda *args, **kwargs: object())
     monkeypatch.setattr(mcp_proxy, "streamable_http_client", stop_bridge)
 
     with pytest.raises(StopBridge):

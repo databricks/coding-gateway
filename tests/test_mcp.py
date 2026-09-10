@@ -36,6 +36,9 @@ class TestMcpChangeSummary:
 # The proxy argv every client registers as a stdio command. The leading element
 # is the resolved `ucode` binary path, so tests assert the tail (the stable part).
 GH_URL = f"{WS}/api/2.0/mcp/external/github"
+# A connection-backed AI Gateway MCP service (3-part FQN) — the URL form that
+# registers as direct HTTP for Claude when the claude-code client is available.
+AIGW_MCP_URL = f"{WS}/ai-gateway/mcp-services/system.ai.github"
 PROXY_TAIL = ["mcp-proxy", "--url", GH_URL, "--host", WS, "--profile", "p"]
 
 
@@ -290,6 +293,62 @@ class TestConfigureClientMcpServer:
         assert removed_scopes == []
         # Copilot receives the proxy argv, not a URL/bearer entry.
         assert calls == [("github", _proxy_argv())]
+
+    def _capture_claude(self, monkeypatch, *, claude_code_available: bool):
+        http_calls: list[tuple[str, str]] = []
+        proxy_calls: list[tuple[str, list[str]]] = []
+        monkeypatch.setattr(
+            mcp, "oauth_client_available", lambda ws, client_id: claude_code_available
+        )
+        monkeypatch.setattr(mcp, "remove_claude_mcp_server", lambda name, scope: False)
+        monkeypatch.setattr(
+            mcp,
+            "add_claude_http_mcp_server",
+            lambda name, url, **kw: http_calls.append((name, url)),
+        )
+        monkeypatch.setattr(
+            mcp,
+            "add_claude_mcp_server",
+            lambda name, argv, scope=mcp.MCP_USER_SCOPE, **kw: proxy_calls.append((name, argv)),
+        )
+        return http_calls, proxy_calls
+
+    def test_claude_aigw_service_registers_http_when_client_available(self, monkeypatch):
+        http_calls, proxy_calls = self._capture_claude(monkeypatch, claude_code_available=True)
+        mcp.configure_client_mcp_server("claude", "github", AIGW_MCP_URL, WS, "p")
+        assert http_calls == [("github", AIGW_MCP_URL)]
+        assert proxy_calls == []
+
+    def test_claude_aigw_service_falls_back_to_proxy_without_client(self, monkeypatch):
+        http_calls, proxy_calls = self._capture_claude(monkeypatch, claude_code_available=False)
+        mcp.configure_client_mcp_server("claude", "github", AIGW_MCP_URL, WS, "p")
+        assert http_calls == []
+        assert len(proxy_calls) == 1  # workspaces without claude-code keep the stdio proxy
+
+    def test_claude_non_aigw_url_keeps_proxy(self, monkeypatch):
+        # External/genie/vector-search/functions MCPs have no per-user connection login.
+        http_calls, proxy_calls = self._capture_claude(monkeypatch, claude_code_available=True)
+        mcp.configure_client_mcp_server("claude", "github", GH_URL, WS, "p")
+        assert http_calls == []
+        assert len(proxy_calls) == 1
+
+    def test_claude_aigw_service_with_pat_keeps_proxy(self, monkeypatch):
+        # PAT auth has no interactive OAuth, so it can't use the HTTP login path.
+        http_calls, proxy_calls = self._capture_claude(monkeypatch, claude_code_available=True)
+        mcp.configure_client_mcp_server("claude", "github", AIGW_MCP_URL, WS, "p", use_pat=True)
+        assert http_calls == []
+        assert len(proxy_calls) == 1
+
+    def test_non_claude_client_keeps_proxy_for_aigw_service(self, monkeypatch):
+        # Only Claude's HTTP+OAuth registration is wired; other clients proxy.
+        calls: list[tuple[str, list[str]]] = []
+        monkeypatch.setattr(
+            mcp.cursor,
+            "write_mcp_server_config",
+            lambda name, argv: calls.append((name, argv)) or False,
+        )
+        mcp.configure_client_mcp_server("cursor", "github", AIGW_MCP_URL, WS, "p")
+        assert len(calls) == 1
 
 
 class TestMcpPicker:

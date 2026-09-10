@@ -2299,3 +2299,78 @@ def add_skills_command(locations: list[str], agents: set[str] | None = None) -> 
         )
     _update_skills_mcp(state, workspace, profile, clients, locations_by_client)
     return 0
+
+
+def _prompt_for_skill_removal(locations_by_client: dict[str, list[str]]) -> list[str] | None:
+    """Checklist of skill schemas to remove, each annotated with the clients it's scoped to.
+    Returns the selected locations, ``None`` if cancelled (Ctrl-C), or ``[]`` if nothing checked."""
+    choices: list[questionary.Choice | questionary.Separator] = []
+    ordered_locations = list(
+        dict.fromkeys(
+            location for locations in locations_by_client.values() for location in locations
+        )
+    )
+    for location in ordered_locations:
+        displays = [
+            str(MCP_CLIENTS[client]["display"])
+            for client, locations in locations_by_client.items()
+            if location in locations
+        ]
+        choices.append(
+            questionary.Choice(
+                title=f"{location} ({', '.join(displays)})",
+                value=location,
+                checked=False,
+            )
+        )
+    if not choices:
+        return []
+    selection = _scrolling_checkbox(
+        "Remove skill schemas:",
+        choices=choices,
+        style=_picker_style(),
+        instruction="(space to toggle, ctrl-a all, enter to remove, type to filter)",
+    ).ask()
+    if selection is None:
+        return None
+    return [str(value) for value in selection]
+
+
+def remove_skills_command() -> int:
+    """`ucode skill remove --mcp`: interactively drop skill schemas from every configured client.
+
+    Shows the schemas currently in each configured client's skills scope and removes the ones you
+    select from every client that has them. It never adds or reconfigures anything, and needs no
+    Databricks auth."""
+    state = load_state()
+    workspace, profile, clients = setup_mcp_clients(
+        state,
+        "Remove Skills MCP",
+        require_auth=False,
+        action_note="Removing from",
+    )
+    locations_by_client = _skill_locations_by_client_from_state(state)
+    offered = {client: locations_by_client.get(client, []) for client in clients}
+    if not any(offered.values()):
+        print_note("No skill schemas are configured to remove.")
+        return 0
+
+    selection = _prompt_for_skill_removal(offered)
+    if selection is None:
+        return 0
+    if not selection:
+        print_note("No skill schemas selected.")
+        return 0
+
+    remove_locations = set(selection)
+    for client in clients:
+        locations_by_client[client] = [
+            location
+            for location in locations_by_client.get(client, [])
+            if location not in remove_locations
+        ]
+    _update_skills_mcp(state, workspace, profile, clients, locations_by_client, print_summary=False)
+    print_success(
+        f"Removed {len(remove_locations)} skill schema{'s' if len(remove_locations) != 1 else ''}."
+    )
+    return 0

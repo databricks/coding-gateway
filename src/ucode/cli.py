@@ -112,6 +112,7 @@ from ucode.mcp import (
     configured_mcp_clients,
     purge_cross_workspace_mcp_residue,
     remove_mcp_command,
+    remove_skills_command,
     revert_mcp_configs,
     skill_locations_for_client,
 )
@@ -1049,6 +1050,7 @@ def status() -> int:
     print_note(
         "Use `ug configure skills` to set up Unity Catalog Skills for configured coding tools."
     )
+    print_note("Use `ug skill add` and `ug skill remove --mcp` to manage UC Skills.")
     print_note("Use `ug configure tracing` to log coding sessions to an MLflow experiment.")
     print_note("Use `ug revert` to clear managed configs and restore prior files.")
     return 0
@@ -1393,6 +1395,32 @@ def skills_add(
         else:
             configure_skills_download_command(locations, path=path, skills=selected_skills)
     except (RuntimeError, ValueError) as exc:
+        print_err(str(exc))
+        raise typer.Exit(1) from None
+    except KeyboardInterrupt:
+        print_err("Interrupted.")
+        raise typer.Exit(130) from None
+
+
+@skill_app.command("remove")
+def skills_remove(
+    mcp: Annotated[
+        bool,
+        typer.Option(
+            "--mcp",
+            help="Remove schemas from the skills MCP connection instead of downloaded files.",
+        ),
+    ] = False,
+) -> None:
+    """Interactively remove Skill schemas from the skills MCP connection."""
+    try:
+        if not mcp:
+            raise RuntimeError(
+                "Removing downloaded skills is not supported yet. Pass --mcp to remove "
+                "schemas from the skills MCP connection."
+            )
+        remove_skills_command()
+    except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None
     except KeyboardInterrupt:

@@ -566,6 +566,24 @@ def _launch_token(state: dict, workspace: str) -> str:
     return get_databricks_token(workspace, state.get("profile"))
 
 
+def _reject_managed_mps_catalog() -> None:
+    path = _managed_config_path()
+    if path is None:
+        return
+    text = read_managed_file(path)
+    if text is None:
+        return
+    try:
+        managed = _parse_managed_config(text)
+    except RuntimeError as exc:
+        raise RuntimeError(f"Cannot read Codex managed settings at {path}: {exc}") from exc
+    if "model_catalog_json" in managed:
+        raise RuntimeError(
+            f"Codex managed settings at {path} define model_catalog_json, which overrides MPS "
+            "discovery. Remove it or contact your administrator."
+        )
+
+
 def launch(
     state: dict,
     tool_args: list[str],
@@ -584,6 +602,8 @@ def launch(
         if isinstance(launch_provider, str) and launch_provider.strip()
         else get_provider_service(state, "codex")
     )
+    if workspace and provider:
+        _reject_managed_mps_catalog()
     token = None
     if workspace:
         token = _launch_token(state, workspace)

@@ -651,6 +651,21 @@ class TestCodexLaunch:
         )
         assert 'Databricks-Model-Provider-Service = "main.default.openai"' in provider_arg
 
+    def test_provider_rejects_managed_model_catalog(self, tmp_path, monkeypatch):
+        launches = self._patch(tmp_path, monkeypatch)
+        managed_path = tmp_path / "managed_config.toml"
+        managed_path.write_text('model_catalog_json = "/admin/models.json"\n', encoding="utf-8")
+        monkeypatch.setattr(codex, "_managed_config_path", lambda: managed_path)
+
+        with pytest.raises(RuntimeError, match="overrides MPS discovery"):
+            codex.launch(
+                {"workspace": WS, "_codex_launch_provider": "main.default.openai"},
+                [],
+                options=LaunchOptions(),
+            )
+
+        assert launches == []
+
     def test_non_provider_launch_removes_stale_provider_header(self, tmp_path, monkeypatch):
         launches = self._patch(tmp_path, monkeypatch)
         profile_path = tmp_path / "ucode.config.toml"

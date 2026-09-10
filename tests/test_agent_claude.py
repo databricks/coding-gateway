@@ -205,10 +205,7 @@ class TestRenderOverlay:
         overlay, _ = claude.render_overlay(WS, "s4")
         assert "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY" not in overlay["env"]
 
-    def test_gateway_model_discovery_skipped_under_provider(self, monkeypatch):
-        # A Model Provider Service routes every request to the external provider,
-        # so a discovered gateway endpoint id would reach a provider that can't
-        # resolve it — discovery must be off in that mode.
+    def test_gateway_model_discovery_not_persisted_under_provider(self, monkeypatch):
         monkeypatch.setenv("ENABLE_CLAUDE_CODE_GATEWAY_MODEL_DISCOVERY", "1")
         overlay, _ = claude.render_overlay(WS, "s4", provider="main.x.claude-svc")
         assert "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY" not in overlay["env"]
@@ -1094,7 +1091,14 @@ class TestClaudeLaunch:
             def wait(self):
                 return 0
 
-        def start_proxy(workspace, profile, port, token_header, force_refresh_near_expiry):
+        def start_proxy(
+            workspace,
+            profile,
+            port,
+            token_header,
+            force_refresh_near_expiry,
+            model_provider_service=None,
+        ):
             calls.append(
                 (
                     "proxy",
@@ -1103,6 +1107,7 @@ class TestClaudeLaunch:
                     port,
                     token_header,
                     force_refresh_near_expiry,
+                    model_provider_service,
                 )
             )
             return Server(), Cache(), Client()
@@ -1119,6 +1124,7 @@ class TestClaudeLaunch:
                     "profile": "test",
                     "claude_relayed": True,
                     "relayed_proxy_port": 12345,
+                    "_claude_launch_provider": "main.default.anthropic",
                 },
                 ["--debug"],
                 options=LaunchOptions(),
@@ -1132,6 +1138,7 @@ class TestClaudeLaunch:
             12345,
             claude.gateway_proxy.AI_GATEWAY_TOKEN_HEADER,
             False,
+            "main.default.anthropic",
         )
         assert calls[-3:] == [("stop",), ("shutdown",), ("close",)]
 
@@ -1233,6 +1240,63 @@ class TestClaudeLaunch:
         assert os.environ["OAUTH_TOKEN"] == "token"
         assert os.environ["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] == "1"
         assert calls == [["claude", "--settings", str(claude.CLAUDE_SETTINGS_PATH), "--debug"]]
+
+    def test_gateway_discovery_injects_launch_provider(self, monkeypatch):
+        calls: list[tuple] = []
+
+        class Server:
+            server_address = ("127.0.0.1", 12345)
+
+            def serve_forever(self):
+                calls.append(("serve",))
+
+            def shutdown(self):
+                calls.append(("shutdown",))
+
+        class Cache:
+            token = "fresh-token"
+
+            def stop(self):
+                calls.append(("stop",))
+
+        class Client:
+            def close(self):
+                calls.append(("close",))
+
+        class Process:
+            def __init__(self, argv):
+                calls.append(("popen", argv))
+
+            def wait(self):
+                return 0
+
+        def start_proxy(*args, **kwargs):
+            calls.append(("proxy", args, kwargs))
+            return Server(), Cache(), Client()
+
+        monkeypatch.delenv(v2.ENV_VAR, raising=False)
+        monkeypatch.setenv(claude.GATEWAY_MODEL_DISCOVERY_ENV_VAR, "1")
+        monkeypatch.setattr(claude.gateway_proxy, "start_proxy", start_proxy)
+        monkeypatch.setattr(claude.subprocess, "Popen", Process)
+
+        with pytest.raises(SystemExit) as exc:
+            claude.launch(
+                {"workspace": WS, "_claude_launch_provider": "main.default.anthropic"},
+                ["--debug"],
+                options=LaunchOptions(),
+            )
+
+        assert exc.value.code == 0
+        assert calls[0] == (
+            "proxy",
+            (WS, None, 0),
+            {
+                "token_header": claude.gateway_proxy.AUTHORIZATION_HEADER,
+                "force_refresh_near_expiry": True,
+                "model_provider_service": "main.default.anthropic",
+            },
+        )
+        assert calls[-3:] == [("stop",), ("shutdown",), ("close",)]
 
 
 class TestWriteToolConfigPrunesStaleModelEnv:

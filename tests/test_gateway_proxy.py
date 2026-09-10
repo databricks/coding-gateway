@@ -328,9 +328,11 @@ class _FakeClient:
     def __init__(self, responses):
         self._responses = list(responses)
         self.sent_tokens: list[str | None] = []
+        self.sent_headers: list[dict[str, str]] = []
 
     def stream(self, _method, _url, headers, content):
         self.sent_tokens.append(headers.get(gateway_proxy.AI_GATEWAY_TOKEN_HEADER))
+        self.sent_headers.append(headers)
         return self._responses.pop(0)
 
 
@@ -392,6 +394,28 @@ class _Collect(io.RawIOBase):
 
 
 class TestRetryOn401:
+    def test_injects_provider_header_into_model_discovery(self):
+        client = _FakeClient([_FakeResp(200, b'{"data":[]}')])
+        handler = _handle_handler(client, _FakeCache(), _Collect())
+        handler.command = "GET"
+        handler.path = "/v1/models?limit=20"
+        handler.model_provider_service = "main.default.anthropic"
+
+        handler._handle()
+
+        assert client.sent_headers[0][gateway_proxy.MODEL_PROVIDER_SERVICE_HEADER] == (
+            "main.default.anthropic"
+        )
+
+    def test_does_not_inject_provider_header_into_inference(self):
+        client = _FakeClient([_FakeResp(200, b"ok")])
+        handler = _handle_handler(client, _FakeCache(), _Collect())
+        handler.model_provider_service = "main.default.anthropic"
+
+        handler._handle()
+
+        assert gateway_proxy.MODEL_PROVIDER_SERVICE_HEADER not in client.sent_headers[0]
+
     def test_401_forces_refresh_and_retries(self):
         # A stale swap token yields 401; the proxy force-refreshes and retries,
         # this time succeeding, so Claude Code never sees the 401.
@@ -463,11 +487,13 @@ class TestStartProxyPortFallback:
                 busy_port,
                 token_header=gateway_proxy.AI_GATEWAY_TOKEN_HEADER,
                 force_refresh_near_expiry=False,
+                model_provider_service="main.default.anthropic",
             )
             try:
                 bound = server.server_address[1]
                 assert bound != busy_port  # fell back to a different, free port
                 assert bound != 0
+                assert server.RequestHandlerClass.model_provider_service == "main.default.anthropic"
             finally:
                 server.server_close()
                 client.close()

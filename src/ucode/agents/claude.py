@@ -1150,11 +1150,11 @@ def _original_launch_model(state: dict) -> str | None:
     return default_model(state)
 
 
-def _has_provider_launch(state: dict) -> bool:
+def _launch_provider(state: dict) -> str | None:
     transient = state.get("_claude_launch_provider")
-    return (isinstance(transient, str) and bool(transient.strip())) or bool(
-        get_provider_service(state, "claude")
-    )
+    if isinstance(transient, str) and transient.strip():
+        return transient.strip()
+    return get_provider_service(state, "claude")
 
 
 def _launch_model_args(tool_args: list[str], launch_model: str | None) -> list[str]:
@@ -1260,7 +1260,9 @@ def _rewrite_relayed_port(state: dict, port: int) -> None:
         write_json_file(CLAUDE_SETTINGS_PATH, settings)
 
 
-def _launch_relayed(state: dict, binary: str, tool_args: list[str]) -> None:
+def _launch_relayed(
+    state: dict, binary: str, tool_args: list[str], *, provider: str | None = None
+) -> None:
     """Relayed launch: sign into the Claude subscription, start the loopback
     refresh proxy, then run Claude Code alongside it (the proxy must outlive the
     exec, so we spawn-and-wait rather than replacing the process)."""
@@ -1276,6 +1278,7 @@ def _launch_relayed(state: dict, binary: str, tool_args: list[str]) -> None:
         port,
         token_header=gateway_proxy.AI_GATEWAY_TOKEN_HEADER,
         force_refresh_near_expiry=False,
+        model_provider_service=provider,
     )
     # start_proxy falls back to an OS-assigned port when the cached one is taken
     # (stale proxy from a killed session). Reconcile settings + state to whatever
@@ -1300,6 +1303,41 @@ def _launch_relayed(state: dict, binary: str, tool_args: list[str]) -> None:
     raise SystemExit(returncode)
 
 
+def _launch_with_discovery_proxy(
+    state: dict, binary: str, tool_args: list[str], *, provider: str
+) -> None:
+    workspace = state["workspace"]
+    server, cache, client = gateway_proxy.start_proxy(
+        workspace,
+        state.get("profile"),
+        0,
+        token_header=gateway_proxy.AUTHORIZATION_HEADER,
+        force_refresh_near_expiry=True,
+        model_provider_service=provider,
+    )
+    token = cache.token
+    os.environ["OAUTH_TOKEN"] = token
+    os.environ["ANTHROPIC_AUTH_TOKEN"] = token
+    os.environ["ANTHROPIC_BASE_URL"] = f"http://{LOOPBACK_HOST}:{server.server_address[1]}"
+    os.environ["CLAUDE_CODE_USE_GATEWAY"] = "1"
+
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    settings = {"env": {"ANTHROPIC_BASE_URL": os.environ["ANTHROPIC_BASE_URL"]}}
+    try:
+        proc = subprocess.Popen(_build_claude_argv(binary, tool_args, settings_override=settings))
+        try:
+            returncode = proc.wait()
+        except KeyboardInterrupt:
+            proc.send_signal(signal.SIGINT)
+            returncode = proc.wait()
+    finally:
+        cache.stop()
+        server.shutdown()
+        client.close()
+    raise SystemExit(returncode)
+
+
 def launch(
     state: dict,
     tool_args: list[str],
@@ -1308,8 +1346,9 @@ def launch(
 ) -> None:
     binary = SPEC["binary"]
     workspace = state.get("workspace")
+    provider = _launch_provider(state)
     if state.get("claude_relayed"):
-        _launch_relayed(state, binary, tool_args)
+        _launch_relayed(state, binary, tool_args, provider=provider)
         return
     # Smart routing v2 needs Unix PTY support, which Windows does not provide.
     if options.launch_smart_routing and os.name == "nt":
@@ -1329,14 +1368,13 @@ def launch(
             model_name=_maybe_add_1m_suffix,
         )
         return
-    if (
-        workspace
-        and os.environ.get(GATEWAY_MODEL_DISCOVERY_ENV_VAR) == "1"
-        and not _has_provider_launch(state)
-    ):
+    if workspace and os.environ.get(GATEWAY_MODEL_DISCOVERY_ENV_VAR) == "1":
         # Discovery is launch-scoped. Pass it in the process environment rather
         # than persisting it in Claude's private or OS-managed settings.
         os.environ["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
+        if provider:
+            _launch_with_discovery_proxy(state, binary, tool_args, provider=provider)
+            return
     if workspace:
         os.environ["OAUTH_TOKEN"] = get_databricks_token(workspace, state.get("profile"))
     if options.claude_launch_model:

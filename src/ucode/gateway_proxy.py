@@ -34,6 +34,7 @@ from ucode.databricks import get_databricks_token
 # client-supplied value is replaced, so a stale settings.json value can't leak.
 AI_GATEWAY_TOKEN_HEADER = "X-Databricks-AI-Gateway-Token"
 AUTHORIZATION_HEADER = "Authorization"
+MODEL_PROVIDER_SERVICE_HEADER = "Databricks-Model-Provider-Service"
 # Hop-by-hop headers must not be forwarded across a proxy.
 HOP_BY_HOP_HEADERS = frozenset(
     h.lower()
@@ -200,6 +201,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
     cache: TokenCache
     client: httpx.Client
     token_header = AI_GATEWAY_TOKEN_HEADER
+    model_provider_service: str | None = None
 
     def log_message(self, format: str, *args: object) -> None:
         return
@@ -211,6 +213,16 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             self.send_error(code, message)
         except OSError:
             pass
+
+    def _forwarded_request_headers(self) -> dict[str, str]:
+        headers = forwarded_request_headers(self, self.cache.token, self.token_header)
+        if (
+            self.command == "GET"
+            and self.path.partition("?")[0] == "/v1/models"
+            and self.model_provider_service
+        ):
+            headers[MODEL_PROVIDER_SERVICE_HEADER] = self.model_provider_service
+        return headers
 
     def _handle(self) -> None:
         diagnostic_id = uuid.uuid4().hex[:12]
@@ -226,7 +238,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         )
         try:
             # First attempt with the current token.
-            headers = forwarded_request_headers(self, self.cache.token, self.token_header)
+            headers = self._forwarded_request_headers()
             with self.client.stream(self.command, url, headers=headers, content=body) as resp:
                 log_proxy_diagnostic(
                     "upstream_headers",
@@ -256,7 +268,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                 # which otherwise reads as an Anthropic `/login` prompt and sends the
                 # user to the wrong re-auth. Still retry + relay with the existing token.
                 log_token_refresh_failure(exc)
-            headers = forwarded_request_headers(self, self.cache.token, self.token_header)
+            headers = self._forwarded_request_headers()
             with self.client.stream(self.command, url, headers=headers, content=body) as resp:
                 log_proxy_diagnostic(
                     "upstream_headers",
@@ -374,6 +386,7 @@ def start_proxy(
     port: int,
     token_header: str,
     force_refresh_near_expiry: bool,
+    model_provider_service: str | None = None,
 ) -> tuple[ThreadingHTTPServer, TokenCache, httpx.Client]:
     """Start the loopback refresh proxy + its background token refresher.
 
@@ -399,7 +412,12 @@ def start_proxy(
     handler = type(
         "BoundProxyHandler",
         (_ProxyHandler,),
-        {"cache": cache, "client": client, "token_header": token_header},
+        {
+            "cache": cache,
+            "client": client,
+            "token_header": token_header,
+            "model_provider_service": model_provider_service,
+        },
     )
     try:
         server = ThreadingHTTPServer(("127.0.0.1", port), handler)

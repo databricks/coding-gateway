@@ -355,7 +355,6 @@ def prompt_for_workspace(
     URL manually.
     """
     console.print()
-    console.print(Panel(description, title="ucode setup", style="bold blue", expand=False))
 
     if profiles:
         name_header = "Profile Name"

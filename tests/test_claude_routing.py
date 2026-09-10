@@ -24,7 +24,8 @@ class _Response:
         return json.dumps(self.payload).encode("utf-8")
 
 
-def test_routes_with_task_v1_claude_menu(monkeypatch):
+def test_routes_with_default_claude_menu(monkeypatch):
+    monkeypatch.delenv("SMART_ROUTER_NAME", raising=False)
     captured = {}
 
     def fake_urlopen(request, timeout):
@@ -65,7 +66,7 @@ def test_routes_with_task_v1_claude_menu(monkeypatch):
             {"model": "claude-sonnet-5", "harness": "claude"},
         ],
         "task": {"prompt": "Refactor the parser"},
-        "route_selector": {"router_name": "task_v1"},
+        "route_selector": {"router_name": claude_routing.ROUTER_NAME},
     }
 
 
@@ -157,9 +158,10 @@ def test_spawn_rewrite_injects_routed_model(monkeypatch):
     # The rationale is surfaced in the systemMessage (shown to the user), not
     # only in permissionDecisionReason. The model field is the short family
     # name ("opus") that Claude Code's Agent tool schema accepts.
-    assert output["systemMessage"] == (
-        "Using Smart Routing. Routing to opus. Deep exploration needs the strongest model."
+    expected_message = claude_routing.routing.format_subagent_message(
+        "opus", "Deep exploration needs the strongest model."
     )
+    assert output["systemMessage"] == expected_message
     assert hook["permissionDecision"] == "allow"
     assert hook["updatedInput"] == {
         "subagent_type": "Explore",
@@ -167,9 +169,7 @@ def test_spawn_rewrite_injects_routed_model(monkeypatch):
         "description": "explore",
         "model": "opus",
     }
-    assert hook["permissionDecisionReason"] == (
-        "Using Smart Routing. Routing to opus. Deep exploration needs the strongest model."
-    )
+    assert hook["permissionDecisionReason"] == expected_message
 
 
 def test_task_tool_alias_is_routed(monkeypatch):
@@ -332,41 +332,3 @@ def test_subagent_start_without_model_reports_unknown_not_mismatch(tmp_path, mon
 
     assert record["requested_model"] == "sonnet"
     assert record["matches_router_decision"] is None
-
-
-def test_launch_task_uses_positional_prompt():
-    assert claude_routing._launch_routing_task(["fix the parser"]) == "fix the parser"
-
-
-def test_launch_task_skips_value_option_before_prompt():
-    assert (
-        claude_routing._launch_routing_task(["--model", "claude-opus-4-8", "refactor it"])
-        == "refactor it"
-    )
-
-
-def test_launch_task_honors_double_dash():
-    assert claude_routing._launch_routing_task(["--", "--literal prompt"]) == "--literal prompt"
-
-
-def test_launch_task_bare_launch_returns_none():
-    # No prompt on the command line → None, so the caller skips routing and
-    # keeps the user's default model.
-    assert claude_routing._launch_routing_task([]) is None
-
-
-def test_launch_task_flags_only_returns_none():
-    assert claude_routing._launch_routing_task(["--model", "claude-sonnet-5", "-p"]) is None
-
-
-def test_route_launch_model_skips_routing_without_prompt(monkeypatch):
-    # Bare launch: no router call at all, no decision, no error.
-    def fail(*args, **kwargs):
-        raise AssertionError("router must not be called on a bare launch")
-
-    monkeypatch.setattr(claude_routing, "request_routing_decision", fail)
-    decision, error = claude_routing.route_launch_model(
-        {"workspace": WS, "claude_models": {"opus": "system.ai.claude-opus-4-8"}}, []
-    )
-    assert decision is None
-    assert error is None

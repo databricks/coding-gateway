@@ -31,25 +31,25 @@ class _FakeHandler:
 class TestForwardedRequestHeaders:
     def test_injects_swap_header_with_bearer(self):
         handler = _FakeHandler({"Authorization": "Bearer anthropic-oauth"})
-        out = gateway_proxy._forwarded_request_headers(handler, "dbx-token")
+        out = gateway_proxy.forwarded_request_headers(handler, "dbx-token")
         assert out["X-Databricks-AI-Gateway-Token"] == "Bearer dbx-token"
 
     def test_passes_authorization_through_untouched(self):
         # The caller's Anthropic OAuth must survive verbatim — the proxy never
         # reads or rewrites it.
         handler = _FakeHandler({"Authorization": "Bearer anthropic-oauth"})
-        out = gateway_proxy._forwarded_request_headers(handler, "dbx-token")
+        out = gateway_proxy.forwarded_request_headers(handler, "dbx-token")
         assert out["Authorization"] == "Bearer anthropic-oauth"
 
     def test_overwrites_client_supplied_swap_header(self):
         # A stale settings.json value must not survive; the proxy replaces it.
         handler = _FakeHandler({"X-Databricks-AI-Gateway-Token": "Bearer stale"})
-        out = gateway_proxy._forwarded_request_headers(handler, "fresh")
+        out = gateway_proxy.forwarded_request_headers(handler, "fresh")
         assert out["X-Databricks-AI-Gateway-Token"] == "Bearer fresh"
 
     def test_overwrites_authorization_header(self):
         handler = _FakeHandler({"Authorization": "Bearer stale"})
-        out = gateway_proxy._forwarded_request_headers(
+        out = gateway_proxy.forwarded_request_headers(
             handler, "fresh", gateway_proxy.AUTHORIZATION_HEADER
         )
         assert out["Authorization"] == "Bearer fresh"
@@ -58,7 +58,7 @@ class TestForwardedRequestHeaders:
         handler = _FakeHandler(
             {"Host": "localhost:9", "Content-Length": "5", "Connection": "keep-alive"}
         )
-        out = gateway_proxy._forwarded_request_headers(handler, "t")
+        out = gateway_proxy.forwarded_request_headers(handler, "t")
         assert "Host" not in out
         assert "Content-Length" not in out
         assert "Connection" not in out
@@ -237,19 +237,19 @@ def _install_fake_token(monkeypatch, exp_offsets, delay=0.0):
 class TestTokenCache:
     def test_initial_mint_preserves_default_nonforce_refresh(self, monkeypatch):
         state = _install_fake_token(monkeypatch, [5000])
-        gateway_proxy._TokenCache("ws", None)
+        gateway_proxy.TokenCache("ws", None)
         assert state["forces"] == [False]
 
     def test_fresh_token_is_not_refreshed(self, monkeypatch):
         state = _install_fake_token(monkeypatch, [5000])
-        cache = gateway_proxy._TokenCache("ws", None)
+        cache = gateway_proxy.TokenCache("ws", None)
         _ = cache.token
         _ = cache.token
         assert state["forces"] == [False]  # no extra mint while fresh
 
     def test_near_expiry_preserves_default_nonforce_refresh(self, monkeypatch):
         state = _install_fake_token(monkeypatch, [100, 5000])
-        cache = gateway_proxy._TokenCache("ws", None)
+        cache = gateway_proxy.TokenCache("ws", None)
         _ = cache.token
         assert state["forces"] == [False, False]
         _ = cache.token  # now fresh again
@@ -257,7 +257,7 @@ class TestTokenCache:
 
     def test_near_expiry_can_force_refresh(self, monkeypatch):
         state = _install_fake_token(monkeypatch, [100, 5000])
-        cache = gateway_proxy._TokenCache("ws", None, force_refresh_near_expiry=True)
+        cache = gateway_proxy.TokenCache("ws", None, force_refresh_near_expiry=True)
         _ = cache.token
         assert state["forces"] == [True, True]
 
@@ -265,7 +265,7 @@ class TestTokenCache:
         # A burst of concurrent requests at the expiry boundary must trigger ONE
         # refresh, not a thundering herd on the shared token cache.
         state = _install_fake_token(monkeypatch, [100, 5000], delay=0.05)
-        cache = gateway_proxy._TokenCache("ws", None, force_refresh_near_expiry=True)
+        cache = gateway_proxy.TokenCache("ws", None, force_refresh_near_expiry=True)
         threads = [threading.Thread(target=lambda: cache.token) for _ in range(10)]
         for t in threads:
             t.start()
@@ -276,7 +276,7 @@ class TestTokenCache:
 
     def test_ensure_fresh_keeps_token_when_refresh_fails(self, monkeypatch):
         _install_fake_token(monkeypatch, [5000])
-        cache = gateway_proxy._TokenCache("ws", None)
+        cache = gateway_proxy.TokenCache("ws", None)
         good = cache.token
 
         def boom(*_a, **_k):
@@ -289,7 +289,7 @@ class TestTokenCache:
 
     def test_refresher_loop_survives_unexpected_error(self, monkeypatch):
         _install_fake_token(monkeypatch, [5000])
-        cache = gateway_proxy._TokenCache("ws", None)
+        cache = gateway_proxy.TokenCache("ws", None)
         monkeypatch.setattr(gateway_proxy, "_REFRESHER_POLL_S", 0.01)
         ticks = []
 
@@ -346,6 +346,22 @@ class _FakeCache:
     def refresh(self):
         self.refreshed += 1
         self._t = "Bearer-tok2"
+
+
+class _RefreshFailsCache:
+    """A cache whose forced refresh raises, mimicking a dead Databricks OAuth
+    session that can't be re-minted non-interactively."""
+
+    def __init__(self):
+        self.refreshed = 0
+
+    @property
+    def token(self):
+        return "tok1"
+
+    def refresh(self):
+        self.refreshed += 1
+        raise RuntimeError("mint failed")
 
 
 def _handle_handler(client, cache, wfile) -> gateway_proxy._ProxyHandler:
@@ -407,6 +423,19 @@ class TestRetryOn401:
         assert client.sent_tokens == ["Bearer tok1"]
         assert b"hi" in bytes(out.data)
 
+    def test_failed_refresh_surfaces_reauth_hint(self, capsys):
+        # When the forced refresh itself fails (the Databricks OAuth session is
+        # dead, not just the access token), the user must be told to run
+        # `databricks auth login` rather than left with a bare 401 that reads as
+        # an Anthropic `/login` prompt. We still retry + relay whatever comes.
+        client = _FakeClient([_FakeResp(401, b"a"), _FakeResp(401, b"b")])
+        cache = _RefreshFailsCache()
+        out = _Collect()
+        _handle_handler(client, cache, out)._handle()
+        assert cache.refreshed == 1  # a refresh was attempted
+        assert "databricks auth login" in capsys.readouterr().err
+        assert b"401" in bytes(out.data)  # the response is still relayed
+
 
 class TestStartProxyPortFallback:
     def test_falls_back_to_free_port_when_cached_port_busy(self, monkeypatch):
@@ -418,7 +447,7 @@ class TestStartProxyPortFallback:
 
         monkeypatch.setattr(
             gateway_proxy,
-            "_TokenCache",
+            "TokenCache",
             lambda workspace, profile, **_kwargs: _StubCache(),
         )
         # Occupy a port to simulate the leftover proxy holding it.

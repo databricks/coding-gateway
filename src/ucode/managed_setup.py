@@ -218,9 +218,6 @@ def _model_config_payload(tool: str, model_config: dict) -> dict:
 def _enabled_agent_payload(tool: str, agent_config: dict) -> dict:
     """Build one ``EnabledAgent`` entry (agent enum + its ``AgentConfig``)."""
     config: dict = {}
-    use_as_global = agent_config.get("use_as_global_settings")
-    if isinstance(use_as_global, bool):
-        config["use_as_global_settings"] = use_as_global
     headers = agent_config.get("custom_headers")
     if isinstance(headers, dict):
         clean = {k: v for k, v in headers.items() if isinstance(k, str) and isinstance(v, str)}
@@ -290,7 +287,7 @@ def serialize_managed_config(manifest: dict) -> dict:
     build doesn't recognize are dropped, mirroring the read side.
 
     Output-only proto fields (``workspace_id``, timestamps, user ids) are never emitted. ``name`` is
-    carried through when present so an update path can address an existing resource; ``ucode apply``
+    carried through when present so an update path can address an existing resource; ``ucode publish``
     omits it on create and lets the server assign one.
     """
     payload: dict = {}

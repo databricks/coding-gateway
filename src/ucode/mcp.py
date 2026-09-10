@@ -732,6 +732,39 @@ def _mcp_service_choice(name: str, known_names: set[str], additive: bool) -> que
     return _add_choice(f"{MCP_SERVICE_SELECTION_PREFIX}{name}", display_title)
 
 
+class _StreamingInquirerControl(InquirerControl):
+    """`InquirerControl` that tolerates an empty or all-disabled choice list.
+
+    Stock `InquirerControl.__init__` ends with ``if not self.is_selection_valid(): raise`` and
+    `is_selection_valid` dereferences `pointed_at`, which `_init_choices` leaves unset when no row
+    is selectable — so constructing it with an empty (or every-row-disabled) list raises, and
+    navigation later hits the same unset cursor. Our picker intentionally opens on an empty list
+    and fills it in via the background loader, and `ug mcp add` can legitimately show only
+    already-configured (disabled) rows. Default the cursor and treat "nothing selectable" as valid
+    so construction, rendering, and navigation don't crash."""
+
+    def is_selection_valid(self) -> bool:
+        if getattr(self, "pointed_at", None) is None:
+            self.pointed_at = 0
+        selectable = any(
+            not isinstance(c, questionary.Separator) and not c.disabled for c in self.choices
+        )
+        if not selectable:
+            # Empty, or every row a separator/disabled: nothing to validate, and nothing for the
+            # navigation skip-loop to land on — report valid so we neither raise nor spin.
+            return True
+        if self.pointed_at >= len(self.choices):
+            return False
+        return super().is_selection_valid()
+
+    def _get_choice_tokens(self):
+        # Stock rendering unconditionally reads `filtered_choices[pointed_at]`, which raises on an
+        # empty list. Render nothing when there are no rows (the picker is still streaming them in).
+        if not self.filtered_choices:
+            return []
+        return super()._get_choice_tokens()
+
+
 def _merge_new_choices(
     existing: list[questionary.Choice | questionary.Separator],
     new_choices: list[questionary.Choice],
@@ -763,7 +796,9 @@ def _scrolling_checkbox(
             style,
         ]
     )
-    control = InquirerControl(
+    # Empty-tolerant control: the picker can open with zero selectable rows (streaming in via the
+    # background loader, or an `mcp add` where everything is already configured) — see the subclass.
+    control = _StreamingInquirerControl(
         choices,
         pointer="›",
         show_description=False,
@@ -869,7 +904,12 @@ def _scrolling_checkbox(
 
     @bindings.add(" ", eager=True)
     def _(_event: Any) -> None:
-        pointed_choice = control.get_pointed_at().value
+        if control.choice_count == 0:
+            return  # nothing to toggle (e.g. picker still streaming, or all rows filtered out)
+        pointed = control.get_pointed_at()
+        if isinstance(pointed, questionary.Separator) or pointed.disabled:
+            return  # separators and already-configured (disabled) rows aren't toggleable
+        pointed_choice = pointed.value
         if pointed_choice in control.selected_options:
             control.selected_options.remove(pointed_choice)
         else:
@@ -892,14 +932,23 @@ def _scrolling_checkbox(
         perform_validation()
 
     def move_cursor_down(event: Any) -> None:
+        if control.choice_count == 0:
+            return
         control.select_next()
-        while not control.is_selection_valid():
+        # Bound the skip-past-disabled scan so an all-disabled list can't spin forever.
+        tries = 0
+        while not control.is_selection_valid() and tries < control.choice_count:
             control.select_next()
+            tries += 1
 
     def move_cursor_up(event: Any) -> None:
+        if control.choice_count == 0:
+            return
         control.select_previous()
-        while not control.is_selection_valid():
+        tries = 0
+        while not control.is_selection_valid() and tries < control.choice_count:
             control.select_previous()
+            tries += 1
 
     def search_filter(event: Any) -> None:
         control.add_search_character(event.key_sequence[0].key)
@@ -1545,7 +1594,7 @@ def _discover_selected_mcp_sources(
     # picker opens immediately. The slow workspace-wide walk streams in afterward via the
     # picker's background loader (see `_mcp_services_background_loader`).
     services: list[str] = []
-    if "mcp-services" in sources:
+    if MCP_SERVICES_SOURCE in sources:
         services = _discover_mcp_source(
             "MCP services",
             lambda: discover_mcp_service_names(workspace, profile),
@@ -1814,17 +1863,14 @@ def _resolve_location_mcp_servers(
     return [*working_servers, *_skills_entries(original_servers)]
 
 
-# The first wizard step lets the user choose which sources to search. Each is a
-# (key, label, default_checked) triple.
-#
-# Only MCP services (the `/ai-gateway/mcp-services/` path) are offered interactively:
-# it's the one source a consumer-only identity can reach. The V2 AI Gateway sources —
-# external connections, Databricks apps, Genie spaces, Vector Search, and UC functions,
-# all served under `/api/2.0/mcp/*` — were removed from the picker because consumer
-# entitlements don't grant access to V2 AI Gateway features. Workspace users who still
-# want one add it non-interactively with a typed `--services` selector (see
-# `V2_MCP_SELECTOR_PREFIXES` and `_configure_v2_mcp_selectors`).
-MCP_SEARCH_SOURCES = (("mcp-services", "MCP services", True),)
+# The interactive picker searches a single source: MCP services (the `/ai-gateway/mcp-services/`
+# path), the one source a consumer-only identity can reach. The V2 AI Gateway sources — external
+# connections, Databricks apps, Genie spaces, Vector Search, and UC functions, all served under
+# `/api/2.0/mcp/*` — aren't offered in the picker because consumer entitlements don't grant access
+# to them; workspace users add one non-interactively with a typed `--services` selector (see
+# `V2_MCP_SELECTOR_PREFIXES` and `_configure_v2_mcp_selectors`). Since there's a single source,
+# there is no "choose sources" wizard step.
+MCP_SERVICES_SOURCE = "mcp-services"
 
 # Typed `--services` selectors that name a V2 AI Gateway MCP server directly, e.g.
 # `vector-search:main.docs` or `uc-functions:main.tools`. These bypass the interactive
@@ -1842,30 +1888,6 @@ V2_MCP_SELECTOR_PREFIXES = (
 def _is_v2_mcp_selector(service: str) -> bool:
     """Whether a `--services` entry is a typed V2 MCP selector (see `V2_MCP_SELECTOR_PREFIXES`)."""
     return service.startswith(V2_MCP_SELECTOR_PREFIXES)
-
-
-def prompt_for_mcp_search_sources(exclude_sources: set[str] | None = None) -> set[str] | None:
-    """First wizard step: choose which sources to search. Returns the set of
-    selected source keys, or `None` if the user cancelled (Ctrl-C).
-
-    ``exclude_sources`` drops source keys the caller can't use — e.g. `ucode setup` excludes
-    ``apps`` because a managed config can't carry an app's off-workspace host, so offering it would
-    let an admin pick a server that is then silently dropped."""
-    excluded = exclude_sources or set()
-    choices = [
-        questionary.Choice(title=label, value=key, checked=checked)
-        for key, label, checked in MCP_SEARCH_SOURCES
-        if key not in excluded
-    ]
-    selection = _scrolling_checkbox(
-        "Search for:",
-        choices=choices,
-        style=_picker_style(),
-        instruction="(space to toggle, ctrl-a all, enter to search)",
-    ).ask()
-    if selection is None:
-        return None
-    return {str(value) for value in selection}
 
 
 def setup_mcp_clients(
@@ -2127,49 +2149,28 @@ def configure_mcp_command(
         picker_servers = [s for s in picker_servers if not _is_app_mcp_server(s)]
     original_by_name = _servers_by_name(picker_servers)
 
-    # Two-step wizard: (1) choose which sources to search, (2) pick servers from
-    # the results. Pressing Left (←) in the picker returns to step 1, so the user
-    # can revise their source selection without restarting the command. When only
-    # one search source is available (MCP services — the V2 sources were removed),
-    # step 1 has nothing to choose, so skip it and go straight to the picker.
-    available_source_keys = [k for k, _, _ in MCP_SEARCH_SOURCES if k not in excluded_sources]
-    prompt_sources = len(available_source_keys) > 1
-    while True:
-        if prompt_sources:
-            sources = prompt_for_mcp_search_sources(exclude_sources=excluded_sources)
-            if sources is None:
-                return 0
-        else:
-            sources = set(available_source_keys)
-        discovered = _discover_selected_mcp_sources(workspace, profile, sources)
-
-        # The fast `system.ai` list is shown immediately; the slow workspace-wide walk
-        # streams in behind it so the picker never blocks on it.
-        services_loader = (
-            _mcp_services_background_loader(
-                workspace, profile, set(original_by_name), additive=append
-            )
-            if "mcp-services" in sources
-            else None
-        )
-
-        selections = prompt_for_mcp_server_choices(
-            discovered["external"],
-            discovered["genie"],
-            discovered["apps"],
-            picker_servers,
-            discovered["services"],
-            discovered["vector_search"],
-            discovered["uc_functions"],
-            allow_back=prompt_sources,
-            additive=append,
-            background_loader=services_loader,
-        )
-        if selections is None:
-            return 0
-        if isinstance(selections, _Back):
-            continue
-        break
+    # Single source (MCP services), so there's no "choose sources" step — discover the fast
+    # `system.ai` list, show the picker immediately, and let the workspace-wide walk stream in
+    # behind it via the background loader so the picker never blocks on it.
+    discovered = _discover_selected_mcp_sources(workspace, profile, {MCP_SERVICES_SOURCE})
+    services_loader = _mcp_services_background_loader(
+        workspace, profile, set(original_by_name), additive=append
+    )
+    selections = prompt_for_mcp_server_choices(
+        discovered["external"],
+        discovered["genie"],
+        discovered["apps"],
+        picker_servers,
+        discovered["services"],
+        discovered["vector_search"],
+        discovered["uc_functions"],
+        additive=append,
+        background_loader=services_loader,
+    )
+    if selections is None or isinstance(selections, _Back):
+        # No back-navigation without the source step; `_Back` can't occur, but keep the guard
+        # so the type narrows to a selection list below.
+        return 0
 
     available_app_mcp_servers = discovered["apps"]
     available_genie_mcp_servers = discovered["genie"]

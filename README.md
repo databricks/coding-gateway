@@ -115,7 +115,7 @@ ug configure mcp
 Add Databricks MCP servers to installed MCP-capable tools: Codex, Claude Code, Gemini CLI, OpenCode, GitHub Copilot CLI, and Cursor Agent.
 
 The interactive picker discovers **MCP services** (the `system.ai.*` and workspace-wide
-`<catalog>.<schema>` Unity Catalog MCP services), plus Databricks SQL and a custom MCP server URL.
+`<catalog>.<schema>` Unity Catalog MCP services) and a custom MCP server URL.
 
 V2 AI Gateway servers — Vector Search, UC Functions, external connections, Genie spaces, and
 Databricks apps — are **not** offered in the picker, because consumer-only identities can't

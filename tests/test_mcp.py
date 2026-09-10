@@ -604,26 +604,14 @@ class TestMcpPicker:
 
 
 def _patch_mcp_choices(monkeypatch, *values: str, categories: set[str] | None = None) -> None:
+    # `categories` is accepted for backward compatibility with callers that used to widen the
+    # (now-removed) source-selection step; it no longer affects anything since the picker searches
+    # only MCP services.
+    del categories
     monkeypatch.setattr(
         mcp,
         "prompt_for_mcp_server_choices",
         lambda *args, **kwargs: list(values),
-    )
-    # The first wizard step chooses which sources to search. Default to the
-    # fast pre-checked ones (external, apps, MCP services, genie); tests that
-    # exercise the slow walks (vector-search / uc-functions) pass those keys via
-    # `categories`, which are unioned in.
-    default_sources = {"external", "apps", "mcp-services", "genie"}
-    selected_sources = default_sources | (categories or set())
-    # Production ships a single search source (MCP services), so the source-selection
-    # step is skipped. These tests exercise the server-selection machinery (which still
-    # supports every server type via non-interactive add / managed configs), so restore a
-    # multi-source picker to keep that step live and use the stubbed source selection.
-    monkeypatch.setattr(
-        mcp, "MCP_SEARCH_SOURCES", tuple((key, key, True) for key in sorted(selected_sources))
-    )
-    monkeypatch.setattr(
-        mcp, "prompt_for_mcp_search_sources", lambda exclude_sources=None: selected_sources
     )
     # Stub the always-on discoveries so configure_mcp_command tests don't hit
     # real APIs. Individual tests override these after calling the helper.
@@ -703,75 +691,6 @@ class TestApplyMcpServerChanges:
         servers = [self._server("a", ["claude"])]
 
         assert mcp.apply_mcp_server_changes(servers, servers, ["claude"], WS) is False
-
-
-class TestConfigureMcpWizardNavigation:
-    def test_back_reshows_source_screen(self, monkeypatch):
-        """Pressing ← in the picker (returns _BACK) re-runs the source screen,
-        then the picker again; a real selection on the second pass proceeds."""
-        monkeypatch.setattr(mcp, "load_state", lambda: {**CLAUDE_STATE})
-        monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
-        monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace, profile=None: None)
-        monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
-        # Multiple sources keep the source-selection step live (production ships one).
-        monkeypatch.setattr(
-            mcp,
-            "MCP_SEARCH_SOURCES",
-            (("external", "external", True), ("mcp-services", "MCP services", True)),
-        )
-        monkeypatch.setattr(
-            mcp, "discover_external_mcp_connection_names", lambda workspace, profile=None: []
-        )
-        monkeypatch.setattr(mcp, "discover_app_mcp_servers", lambda workspace, profile=None: [])
-        monkeypatch.setattr(mcp, "discover_genie_mcp_servers", lambda workspace, profile=None: [])
-        monkeypatch.setattr(mcp, "discover_mcp_service_names", lambda workspace, profile=None: [])
-        monkeypatch.setattr(
-            mcp,
-            "discover_all_mcp_service_names",
-            lambda workspace, profile=None, on_progress=None: [],
-        )
-
-        source_calls: list[int] = []
-
-        def fake_sources(exclude_sources=None):
-            source_calls.append(1)
-            return {"external", "mcp-services"}
-
-        monkeypatch.setattr(mcp, "prompt_for_mcp_search_sources", fake_sources)
-
-        # First picker press = back, second = submit nothing.
-        picker_results = [mcp._BACK, []]
-        monkeypatch.setattr(
-            mcp,
-            "prompt_for_mcp_server_choices",
-            lambda *a, **k: picker_results.pop(0),
-        )
-        monkeypatch.setattr(mcp, "save_state", lambda state: None)
-
-        assert mcp.configure_mcp_command() == 0
-        # Source screen shown twice (initial + after back).
-        assert len(source_calls) == 2
-
-    def test_cancel_on_source_screen_exits(self, monkeypatch):
-        monkeypatch.setattr(mcp, "load_state", lambda: {**CLAUDE_STATE})
-        monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
-        monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace, profile=None: None)
-        monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
-        # Multiple sources keep the source-selection step live (production ships one).
-        monkeypatch.setattr(
-            mcp,
-            "MCP_SEARCH_SOURCES",
-            (("external", "external", True), ("mcp-services", "MCP services", True)),
-        )
-        # Cancelling the first screen (None) returns without discovering anything.
-        monkeypatch.setattr(mcp, "prompt_for_mcp_search_sources", lambda exclude_sources=None: None)
-        monkeypatch.setattr(
-            mcp,
-            "prompt_for_mcp_server_choices",
-            lambda *a, **k: pytest.fail("picker should not run after cancel"),
-        )
-
-        assert mcp.configure_mcp_command() == 0
 
 
 class TestConfigureMcpCommand:
@@ -1088,55 +1007,6 @@ class TestConfigureMcpCommand:
         assert mcp.configure_mcp_command() == 0
         assert called == []
 
-    def test_registers_discovered_app_mcp_server(self, monkeypatch):
-        saved_states: list[dict] = []
-        configured: list[tuple[str, str, str, dict]] = []
-
-        monkeypatch.setattr(mcp, "load_state", lambda: {**CLAUDE_STATE})
-        monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
-        monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace, profile=None: None)
-        monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
-        monkeypatch.setattr(
-            mcp, "discover_external_mcp_connection_names", lambda workspace, profile=None: []
-        )
-        monkeypatch.setattr(mcp, "discover_genie_mcp_servers", lambda workspace, profile=None: [])
-        monkeypatch.setattr(
-            mcp,
-            "discover_app_mcp_servers",
-            lambda workspace, profile=None: [
-                {
-                    "name": "databricks-app-mcp-my-app",
-                    "title": "mcp-my-app",
-                    "url": "https://mcp-my-app.example.databricksapps.com/mcp",
-                }
-            ],
-        )
-        _patch_mcp_choices(monkeypatch, f"{mcp.MCP_ADD_PREFIX}app:mcp-my-app")
-        monkeypatch.setattr(
-            mcp,
-            "configure_client_mcp_server",
-            lambda client, name, url, *a, **kw: configured.append((client, name, url)) or [],
-        )
-        monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
-
-        assert mcp.configure_mcp_command() == 0
-
-        assert configured == [
-            (
-                "claude",
-                "databricks-app-mcp-my-app",
-                "https://mcp-my-app.example.databricksapps.com/mcp",
-            )
-        ]
-        assert saved_states[-1]["mcp_servers"] == [
-            {
-                "name": "databricks-app-mcp-my-app",
-                "url": "https://mcp-my-app.example.databricksapps.com/mcp",
-                "auth": "proxy",
-                "clients": ["claude"],
-            }
-        ]
-
     def test_hints_when_no_selections_and_no_existing_servers(self, monkeypatch, capsys):
         saved_states: list[dict] = []
 
@@ -1191,11 +1061,6 @@ class TestConfigureMcpCommand:
         )
         monkeypatch.setattr(
             mcp, "discover_uc_functions_mcp_servers", lambda workspace, profile=None: []
-        )
-        monkeypatch.setattr(
-            mcp,
-            "prompt_for_mcp_search_sources",
-            lambda exclude_sources=None: {"external", "apps", "mcp-services", "genie"},
         )
         monkeypatch.setattr(
             mcp,
@@ -1439,7 +1304,9 @@ class TestConfigureMcpCommand:
         assert "unrecognized" in output
         assert configured == []
 
-    def test_continues_when_optional_discovery_fails(self, monkeypatch, capsys):
+    def test_continues_when_mcp_service_discovery_fails(self, monkeypatch, capsys):
+        # A failure discovering the fast `system.ai` list is best-effort: it's skipped with a
+        # warning and configure still proceeds (the picker opens; the walk streams in behind it).
         saved_states: list[dict] = []
         configured: list[tuple[str, str, str, dict]] = []
 
@@ -1447,28 +1314,15 @@ class TestConfigureMcpCommand:
         monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
         monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace, profile=None: None)
         monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
+        _patch_mcp_choices(monkeypatch, f"{mcp.MCP_ADD_PREFIX}managed:sql")
+        # Override after _patch_mcp_choices (which also stubs this) so the failure sticks.
         monkeypatch.setattr(
             mcp,
-            "discover_external_mcp_connection_names",
+            "discover_mcp_service_names",
             lambda workspace, profile=None: (_ for _ in ()).throw(
                 RuntimeError("permission denied")
             ),
         )
-        monkeypatch.setattr(
-            mcp,
-            "discover_genie_mcp_servers",
-            lambda workspace, profile=None: (_ for _ in ()).throw(
-                RuntimeError("permission denied")
-            ),
-        )
-        monkeypatch.setattr(
-            mcp,
-            "discover_app_mcp_servers",
-            lambda workspace, profile=None: (_ for _ in ()).throw(
-                RuntimeError("permission denied")
-            ),
-        )
-        _patch_mcp_choices(monkeypatch, f"{mcp.MCP_ADD_PREFIX}managed:sql", categories={"genie"})
         monkeypatch.setattr(
             mcp,
             "configure_client_mcp_server",
@@ -1479,9 +1333,7 @@ class TestConfigureMcpCommand:
         assert mcp.configure_mcp_command() == 0
 
         output = capsys.readouterr().out
-        assert "Skipped external connections" in output
-        assert "Skipped Genie spaces" in output
-        assert "Skipped Databricks apps" in output
+        assert "Skipped MCP services" in output
         assert configured[0][1] == "databricks-sql"
         assert saved_states[-1]["mcp_servers"][0]["name"] == "databricks-sql"
 
@@ -1498,30 +1350,17 @@ class TestConfigureMcpCommand:
         monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace, profile=None: None)
         monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
 
-        def fake_external(workspace, profile=None):
-            seen_profiles["external"] = profile
+        def fake_services(workspace, profile=None):
+            seen_profiles["mcp-services"] = profile
             return []
 
-        def fake_genie(workspace, profile=None):
-            seen_profiles["genie"] = profile
-            return []
-
-        def fake_apps(workspace, profile=None):
-            seen_profiles["apps"] = profile
-            return []
-
-        monkeypatch.setattr(mcp, "discover_external_mcp_connection_names", fake_external)
-        monkeypatch.setattr(mcp, "discover_genie_mcp_servers", fake_genie)
-        monkeypatch.setattr(mcp, "discover_app_mcp_servers", fake_apps)
-        _patch_mcp_choices(monkeypatch, categories={"genie"})
+        _patch_mcp_choices(monkeypatch)
+        # Override after _patch_mcp_choices (which also stubs this) to capture the profile.
+        monkeypatch.setattr(mcp, "discover_mcp_service_names", fake_services)
         monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
 
         assert mcp.configure_mcp_command() == 0
-        assert seen_profiles == {
-            "external": "my-profile",
-            "genie": "my-profile",
-            "apps": "my-profile",
-        }
+        assert seen_profiles == {"mcp-services": "my-profile"}
 
     def test_configures_only_ucode_configured_clients(self, monkeypatch, capsys):
         saved_states: list[dict] = []
@@ -2964,42 +2803,6 @@ class TestApplyManagedSkills:
         assert mcp.apply_managed_skills(state, self._managed("cat.sch"), "not-a-client", WS) == []
 
 
-class TestPromptForMcpSearchSourcesExclusion:
-    def _values(self, monkeypatch, exclude):
-        captured: dict = {}
-
-        class FakePrompt:
-            def ask(self):
-                return []
-
-        def fake_checkbox(*args, **kwargs):
-            captured["choices"] = kwargs["choices"]
-            return FakePrompt()
-
-        # Simulate a multi-source picker so exclusion is observable (production ships one).
-        monkeypatch.setattr(
-            mcp,
-            "MCP_SEARCH_SOURCES",
-            (
-                ("external", "external", True),
-                ("apps", "apps", True),
-                ("mcp-services", "MCP services", True),
-                ("genie", "genie", True),
-            ),
-        )
-        monkeypatch.setattr(mcp, "_scrolling_checkbox", fake_checkbox)
-        mcp.prompt_for_mcp_search_sources(exclude_sources=exclude)
-        return [c.value for c in captured["choices"]]
-
-    def test_apps_excluded(self, monkeypatch):
-        values = self._values(monkeypatch, {"apps"})
-        assert "apps" not in values
-        assert "external" in values and "genie" in values
-
-    def test_nothing_excluded_by_default(self, monkeypatch):
-        assert "apps" in self._values(monkeypatch, None)
-
-
 class TestIsAppMcpServer:
     def test_app_host_is_an_app(self):
         assert mcp._is_app_mcp_server({"url": "https://myapp-1.databricksapps.com/mcp"}) is True
@@ -3030,10 +2833,6 @@ class TestV2McpSelectors:
     def test_is_v2_mcp_selector_rejects_mcp_service_names(self):
         assert not mcp._is_v2_mcp_selector("system.ai.github")
         assert not mcp._is_v2_mcp_selector("github")
-
-    def test_mcp_search_sources_only_offers_mcp_services(self):
-        # V2 AI Gateway sources are removed from the interactive picker.
-        assert [key for key, _, _ in mcp.MCP_SEARCH_SOURCES] == ["mcp-services"]
 
     def _base_mocks(self, monkeypatch):
         monkeypatch.setattr(mcp, "load_state", lambda: {**CLAUDE_STATE})
@@ -3095,7 +2894,11 @@ class TestV2McpSelectors:
 
 
 class TestSingleSourceSkipsPrompt:
-    def test_source_prompt_skipped_and_no_back(self, monkeypatch):
+    def test_no_source_prompt_opens_picker_directly(self, monkeypatch):
+        # There's a single source (MCP services), so there's no "choose sources" step: the picker
+        # opens directly with a background loader and without back-navigation.
+        assert not hasattr(mcp, "prompt_for_mcp_search_sources")
+
         monkeypatch.setattr(mcp, "load_state", lambda: {**CLAUDE_STATE})
         monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
         monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace, profile=None: None)
@@ -3104,16 +2907,12 @@ class TestSingleSourceSkipsPrompt:
         monkeypatch.setattr(
             mcp,
             "discover_all_mcp_service_names",
-            lambda workspace, profile=None, on_progress=None: [],
-        )
-        monkeypatch.setattr(
-            mcp,
-            "prompt_for_mcp_search_sources",
-            lambda exclude_sources=None: pytest.fail("source prompt must be skipped"),
+            lambda workspace, profile=None, on_progress=None, on_services=None: [],
         )
         captured: dict = {}
 
         def fake_choices(*args, **kwargs):
+            captured["background_loader"] = kwargs.get("background_loader")
             captured["allow_back"] = kwargs.get("allow_back")
             return []
 
@@ -3121,7 +2920,8 @@ class TestSingleSourceSkipsPrompt:
         monkeypatch.setattr(mcp, "save_state", lambda state: None)
 
         assert mcp.configure_mcp_command() == 0
-        assert captured["allow_back"] is False
+        assert captured["background_loader"] is not None  # walk streams in behind the picker
+        assert captured["allow_back"] is None  # back-nav no longer requested
 
 
 class TestDiscoverySkipsPermissionErrors:
@@ -3140,3 +2940,21 @@ class TestDiscoverySkipsPermissionErrors:
         assert mcp._discover_mcp_source("Genie spaces", boom) == []
         out = capsys.readouterr().out
         assert "network down" in out
+
+
+class TestStreamingInquirerControl:
+    """The picker must tolerate an empty or all-disabled choice list — it opens empty and streams
+    rows in via the background loader, and `ug mcp add` can show only already-configured rows.
+    Stock InquirerControl raises in __init__/render for these; the subclass must not."""
+
+    def test_tolerates_empty_choice_list(self):
+        control = mcp._StreamingInquirerControl([], pointer="›", show_description=False)
+        assert control.is_selection_valid() is True
+        assert control._get_choice_tokens() == []
+
+    def test_tolerates_all_disabled_choices(self):
+        disabled = mcp._mcp_service_choice("cat.sch.svc", {"cat-sch-svc"}, additive=True)
+        assert disabled.disabled
+        control = mcp._StreamingInquirerControl([disabled], pointer="›", show_description=False)
+        assert control.is_selection_valid() is True
+        control._get_choice_tokens()  # must not raise

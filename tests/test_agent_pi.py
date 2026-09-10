@@ -131,11 +131,12 @@ class TestRenderOverlayCompatFlags:
 
 
 class TestRenderOverlayAuthAndModels:
-    def test_token_in_api_key(self):
+    def test_api_key_config_value_embedded_verbatim(self):
+        # render_overlay takes a pi config value, so it must not reinterpret it.
         overlay, _ = _overlay(
-            "claude-sonnet", token="mytoken", claude_models={"sonnet": "claude-sonnet"}
+            "claude-sonnet", token="!mint.sh", claude_models={"sonnet": "claude-sonnet"}
         )
-        assert overlay["providers"]["databricks-claude"]["apiKey"] == "mytoken"
+        assert overlay["providers"]["databricks-claude"]["apiKey"] == "!mint.sh"
 
     def test_auth_header_flag_set_on_all_providers(self):
         overlay, _ = _overlay(
@@ -347,7 +348,7 @@ class TestWriteToolConfig:
             assert legacy not in written_providers
         assert "databricks-claude" in written_providers
 
-    def test_config_written_with_correct_model_and_token(self, tmp_path, monkeypatch):
+    def test_config_written_with_correct_model_and_auth_command(self, tmp_path, monkeypatch):
         pi_mod, config_file, _, _ = self._setup(tmp_path, monkeypatch)
 
         with (
@@ -358,7 +359,36 @@ class TestWriteToolConfig:
 
         written = json.loads(config_file.read_text())
         assert written["model"] == "databricks-claude/claude-sonnet"
-        assert written["providers"]["databricks-claude"]["apiKey"] == "tok"
+        api_key = written["providers"]["databricks-claude"]["apiKey"]
+        assert api_key.startswith("!")
+        assert "auth-token" in api_key
+
+    def test_bearer_never_written_to_the_config(self, tmp_path, monkeypatch):
+        # The whole point: a token on disk is a token that can go stale, and pi
+        # resolves the command per request instead.
+        pi_mod, config_file, _, _ = self._setup(tmp_path, monkeypatch)
+
+        with (
+            patch("ucode.agents.pi.get_databricks_token", return_value="dapi-secret"),
+            patch("ucode.agents.pi.save_state"),
+        ):
+            pi_mod.write_tool_config(self._state(), "claude-sonnet")
+
+        assert "dapi-secret" not in config_file.read_text()
+
+    def test_every_provider_gets_the_auth_command(self, tmp_path, monkeypatch):
+        pi_mod, config_file, _, _ = self._setup(tmp_path, monkeypatch)
+        state = self._state(codex_models=["gpt-5"], gemini_models=["gemini-2"])
+
+        with (
+            patch("ucode.agents.pi.get_databricks_token", return_value="tok"),
+            patch("ucode.agents.pi.save_state"),
+        ):
+            pi_mod.write_tool_config(state, "claude-sonnet", token="tok")
+
+        providers = json.loads(config_file.read_text())["providers"]
+        for name in ("databricks-claude", "databricks-openai", "databricks-gemini"):
+            assert providers[name]["apiKey"].startswith("!"), name
 
     def test_settings_pins_default_provider_and_model(self, tmp_path, monkeypatch):
         # Without this, Pi's `findInitialModel` can fall through to a built-in
@@ -475,3 +505,29 @@ class TestManagedDefaultModel:
     def test_falls_back_to_pi_models_without_default(self):
         state = {"pi_models": ["system.ai.claude-opus-4-8"]}
         assert pi.default_model(state) == "system.ai.claude-opus-4-8"
+
+
+class TestBuildPiApiKey:
+    """Pi resolves a leading-`!` config value as a command before every provider
+    request, so the apiKey is that command rather than a baked bearer."""
+
+    def test_is_a_pi_command_value_running_auth_token(self):
+        api_key = pi.build_pi_api_key({"workspace": WS})
+
+        assert api_key.startswith("!")
+        assert "auth-token" in api_key
+        assert f"--host {WS}" in api_key
+
+    def test_omits_force_refresh(self):
+        # Pi has no token cache on this path, so --force-refresh would round-trip
+        # to the workspace on every turn.
+        assert "--force-refresh" not in pi.build_pi_api_key({"workspace": WS})
+
+    def test_passes_the_profile_through(self):
+        api_key = pi.build_pi_api_key({"workspace": WS, "profile": "stablebox"})
+
+        assert "--profile stablebox" in api_key
+
+    def test_forwards_use_pat(self):
+        assert "--use-pat" in pi.build_pi_api_key({"workspace": WS, "use_pat": True})
+        assert "--use-pat" not in pi.build_pi_api_key({"workspace": WS})

@@ -242,8 +242,6 @@ class TestOpencodeUserAgent:
         from ucode.agents import opencode
 
         _require_binary("opencode")
-        # Redirect via XDG_CONFIG_HOME so the spawned opencode reads from
-        # tmp_path instead of the developer's real ~/.config/opencode.
         xdg = tmp_path / "xdg"
         opencode_dir = xdg / "opencode"
         opencode_dir.mkdir(parents=True)
@@ -272,7 +270,15 @@ class TestOpencodeUserAgent:
             )
             opencode.write_tool_config(state, "test-claude-model", token="test-token")
 
-        env = {**os.environ, "OAUTH_TOKEN": "test-token", "XDG_CONFIG_HOME": str(xdg)}
+        # OPENCODE_CONFIG names ucode's file. XDG_CONFIG_HOME goes to an empty
+        # directory so the spawned opencode does not read the developer's own
+        # ~/.config/opencode.
+        env = {
+            **os.environ,
+            "OAUTH_TOKEN": "test-token",
+            "OPENCODE_CONFIG": str(config_path),
+            "XDG_CONFIG_HOME": str(tmp_path / "empty-xdg"),
+        }
         result = _run_until_first_request(opencode.validate_cmd("opencode"), env)
 
         req = capture_server.first_request_with_path_prefix("/ai-gateway/anthropic")

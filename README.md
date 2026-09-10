@@ -415,7 +415,7 @@ control the installation.
 | `/etc/claude-code/managed-settings.json` (Linux) or `/Library/Application Support/ClaudeCode/managed-settings.json` (macOS) | Claude Code OS-managed settings |
 | `/etc/codex/managed_config.toml` | Codex OS-managed settings |
 | `~/.gemini/.env` | Gemini CLI |
-| `~/.config/opencode/opencode.json` | OpenCode |
+| `~/.ucode/opencode-xdg/opencode/opencode.json` | OpenCode — a config layer above your own `~/.config/opencode/opencode.json`, which OpenCode still reads |
 | `~/.copilot/.env` | GitHub Copilot CLI |
 | `~/.pi/agent/models.json` | Pi |
 | `~/.cursor/mcp.json` | Cursor Agent (MCP servers only) |

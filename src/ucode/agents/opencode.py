@@ -29,8 +29,11 @@ from ucode.telemetry import agent_version, ucode_version
 
 from .args import LaunchOptions
 
-OPENCODE_XDG_CONFIG_HOME = APP_DIR / "opencode-xdg"
-OPENCODE_CONFIG_DIR = OPENCODE_XDG_CONFIG_HOME / "opencode"
+# ucode keeps its config outside `~/.config/opencode`, so it never writes to the
+# user's own config. Moving this path drops the `mcp` entries that `ucode mcp add`
+# wrote here; re-running the command does not restore them, because ucode writes
+# only when the server list changes.
+OPENCODE_CONFIG_DIR = APP_DIR / "opencode-xdg" / "opencode"
 OPENCODE_CONFIG_PATH = OPENCODE_CONFIG_DIR / "opencode.json"
 OPENCODE_BACKUP_PATH = APP_DIR / "opencode-config.backup.json"
 OPENCODE_AUTH_PLUGIN_PATH = OPENCODE_CONFIG_DIR / "plugin" / "ucode-auth.js"
@@ -385,7 +388,10 @@ def _configure_launch(state: dict) -> str:
 def build_runtime_env(token: str, state: dict | None = None) -> dict[str, str]:
     env = os.environ.copy()
     env["OAUTH_TOKEN"] = token
-    env["XDG_CONFIG_HOME"] = str(OPENCODE_XDG_CONFIG_HOME)
+    # opencode merges this file over the user's global config. It replaces a
+    # top-level array instead of merging it, so this file carries no top-level
+    # array — one would wipe the user's `disabled_providers`.
+    env["OPENCODE_CONFIG"] = str(OPENCODE_CONFIG_PATH)
     return env
 
 

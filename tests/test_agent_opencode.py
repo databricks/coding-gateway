@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import patch
 
 from ucode.agents import opencode
@@ -28,9 +29,10 @@ class TestOpencodeSpec:
     def test_display(self):
         assert opencode.SPEC["display"] == "OpenCode"
 
-    def test_config_path_is_under_ucode_xdg_home(self):
+    def test_config_path_stays_at_the_registered_location(self):
+        # A change here orphans the MCP servers that `ucode mcp add` already wrote.
         assert opencode.SPEC["config_path"] == (
-            opencode.OPENCODE_XDG_CONFIG_HOME / "opencode" / "opencode.json"
+            Path.home() / ".ucode" / "opencode-xdg" / "opencode" / "opencode.json"
         )
 
     def test_update_check_uses_latest_stable_v1(self, monkeypatch):
@@ -380,10 +382,27 @@ class TestBuildRuntimeEnv:
 
         assert env["OAUTH_TOKEN"] == "tok"
 
-    def test_sets_ucode_xdg_config_home(self):
+    def test_names_the_ucode_config_file(self):
         env = opencode.build_runtime_env("tok")
 
-        assert env["XDG_CONFIG_HOME"] == str(opencode.OPENCODE_XDG_CONFIG_HOME)
+        assert env["OPENCODE_CONFIG"] == str(opencode.OPENCODE_CONFIG_PATH)
+
+    # A redirect of XDG_CONFIG_HOME hides the whole of ~/.config/opencode:
+    # permissions, the user's MCP servers, skills, agents and tui.json. So ucode
+    # must neither add the variable nor overwrite the value the user set.
+    def test_passes_the_users_xdg_config_home_through(self, monkeypatch):
+        monkeypatch.setenv("XDG_CONFIG_HOME", "/sentinel/xdg")
+
+        env = opencode.build_runtime_env("tok")
+
+        assert env["XDG_CONFIG_HOME"] == "/sentinel/xdg"
+
+    def test_adds_no_xdg_config_home(self, monkeypatch):
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+
+        env = opencode.build_runtime_env("tok")
+
+        assert "XDG_CONFIG_HOME" not in env
 
 
 class TestOpencodeDefaultModel:

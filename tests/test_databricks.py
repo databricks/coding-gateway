@@ -1975,6 +1975,27 @@ class TestListDatabricksApps:
         with pytest.raises(RuntimeError, match="invalid JSON"):
             list_databricks_apps(WS)
 
+    def test_permission_failure_raises_permission_denied_error(self, monkeypatch):
+        def fake_run(args, **kwargs):
+            raise subprocess.CalledProcessError(
+                1, "databricks", stderr="Error: permission denied on apps"
+            )
+
+        monkeypatch.setattr(db_mod, "run", fake_run)
+
+        with pytest.raises(db_mod.PermissionDeniedError):
+            list_databricks_apps(WS)
+
+    def test_non_permission_cli_failure_stays_generic_runtime_error(self, monkeypatch):
+        def fake_run(args, **kwargs):
+            raise subprocess.CalledProcessError(1, "databricks", stderr="Error: connection reset")
+
+        monkeypatch.setattr(db_mod, "run", fake_run)
+
+        with pytest.raises(RuntimeError) as exc:
+            list_databricks_apps(WS)
+        assert not isinstance(exc.value, db_mod.PermissionDeniedError)
+
 
 class TestProbeUnityGatewayCapabilities:
     def test_model_service_resource_returns_success(self, monkeypatch):

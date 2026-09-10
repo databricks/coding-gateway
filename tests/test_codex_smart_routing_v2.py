@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from ucode.agents import codex
+from ucode.agents import LaunchOptions, codex
 from ucode.smart_routing import codex_interposer, codex_routing, v2
 
 WS = "https://example.databricks.com"
@@ -31,9 +31,16 @@ class TestLaunchCodex:
         monkeypatch.setattr(v2, "launch_codex", lambda *args, **kwargs: pytest.fail("launched"))
 
         with pytest.raises(RuntimeError, match="requires Codex 0.145.0 or newer; found 0.144.0"):
-            codex.launch({"workspace": WS}, [])
+            codex.launch({"workspace": WS}, [], options=LaunchOptions(launch_smart_routing=True))
 
-    def test_codex_launch_dispatches_when_flag_enabled(self, monkeypatch):
+    @pytest.mark.parametrize(
+        ("tool_args", "options"),
+        [
+            ([], LaunchOptions(launch_smart_routing=True)),
+            (["fix the parser"], LaunchOptions(launch_smart_routing=True)),
+        ],
+    )
+    def test_codex_smart_routing_launch_dispatches_to_v2(self, monkeypatch, tool_args, options):
         calls = []
         monkeypatch.setenv(v2.ENV_VAR, "1")
         monkeypatch.setattr(codex, "default_model", lambda state: "gpt-start")
@@ -47,13 +54,13 @@ class TestLaunchCodex:
         state = {"workspace": WS}
 
         with pytest.raises(SystemExit) as exc:
-            codex.launch(state, ["--search"])
+            codex.launch(state, tool_args, options=options)
 
         assert exc.value.code == 0
         assert calls == [
             (
                 state,
-                ["--search"],
+                tool_args,
                 {
                     "binary": "codex",
                     "start_model": "gpt-start",
@@ -61,6 +68,38 @@ class TestLaunchCodex:
                 },
             )
         ]
+
+    @pytest.mark.parametrize(
+        "tool_args",
+        [
+            ["exec", "fix this"],
+            ["review"],
+            ["app-server"],
+            ["update"],
+            ["--model", "gpt-5.6-sol"],
+            ["--model", "gpt-5.6-sol", "--", "fix this"],
+            ["fix this"],
+        ],
+    )
+    def test_codex_launch_bypasses_routing_for_other_shapes(self, tmp_path, monkeypatch, tool_args):
+        launches = []
+        profile_path = tmp_path / "ucode.config.toml"
+        profile_path.write_text('model_provider = "ucode-databricks"\n', encoding="utf-8")
+        monkeypatch.setenv(v2.ENV_VAR, "1")
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", profile_path)
+        monkeypatch.setattr(codex, "clear_model_preferences", lambda state: False)
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.144.0")
+        monkeypatch.setattr(codex, "get_databricks_token", lambda *_args: "token")
+        monkeypatch.setattr(v2, "launch_codex", lambda *args, **kwargs: pytest.fail("launched"))
+        monkeypatch.setattr(codex, "exec_or_spawn", lambda argv: launches.append(argv))
+
+        codex.launch(
+            {"workspace": WS},
+            tool_args,
+            options=LaunchOptions(),
+        )
+
+        assert launches == [["codex", "--config", 'model_provider="ucode-databricks"', *tool_args]]
 
     def test_codex_launch_normalizes_cached_bootstrap_model(self, monkeypatch):
         calls = []
@@ -78,6 +117,7 @@ class TestLaunchCodex:
             codex.launch(
                 {"workspace": WS, "codex_models": ["system.ai.gpt-5-6-luna"]},
                 [],
+                options=LaunchOptions(launch_smart_routing=True),
             )
 
         assert calls[0]["start_model"] == "gpt-5.6-luna"
@@ -306,21 +346,28 @@ class TestInterposerSession:
 
     def test_switches_first_turn(self):
         sess = codex_interposer._Session("gpt-5.5", log=lambda _m: None)
-        output = sess.on_tui_frame(self._turn_start("system.ai.gpt-5-6-luna"))
-        assert json.loads(output)["params"]["model"] == "gpt-5.5"
+        result = sess.on_tui_frame(self._turn_start("system.ai.gpt-5-6-luna"))
+        assert json.loads(result.frame)["params"]["model"] == "gpt-5.5"
+        assert result.needs_settings_update
 
     def test_does_not_schedule_notification_when_model_is_already_selected(self):
         sess = codex_interposer._Session("gpt-5.5", log=lambda _m: None)
         frame = self._turn_start("gpt-5.5")
-        assert sess.on_tui_frame(frame) == frame
+        assert sess.on_tui_frame(frame) == codex_interposer.TuiFrameResult(
+            frame, needs_settings_update=False
+        )
         assert sess.on_engine_frame(self._turn_started("turn-1")) == []
         later_selection = self._turn_start("gpt-5.6")
-        assert sess.on_tui_frame(later_selection) == later_selection
+        assert sess.on_tui_frame(later_selection) == codex_interposer.TuiFrameResult(
+            later_selection, needs_settings_update=False
+        )
 
     def test_non_turn_frames_pass_through(self):
         sess = codex_interposer._Session("gpt-5.5", log=lambda _m: None)
         frame = json.dumps({"method": "initialize", "id": 1, "params": {}})
-        assert sess.on_tui_frame(frame) == frame
+        assert sess.on_tui_frame(frame) == codex_interposer.TuiFrameResult(
+            frame, needs_settings_update=False
+        )
 
     def _turn_started(self, turn_id: str, thread_id: str = "t1") -> str:
         return json.dumps(
@@ -365,7 +412,9 @@ class TestInterposerSession:
         sess.on_tui_frame(self._turn_start("luna"))
         assert sess.on_engine_frame(self._turn_started("turn-1"))
         second_turn = self._turn_start("luna")
-        assert sess.on_tui_frame(second_turn) == second_turn
+        assert sess.on_tui_frame(second_turn) == codex_interposer.TuiFrameResult(
+            second_turn, needs_settings_update=False
+        )
         assert sess.on_engine_frame(self._turn_started("turn-2")) == []
 
     def test_routes_first_prompt_and_uses_returned_model_and_rationale(self):
@@ -390,10 +439,11 @@ class TestInterposerSession:
             switch_message_fn=v2.format_routing_notice,
         )
 
-        output = sess.on_tui_frame(self._turn_start("gpt-5.5", prompt="Fix issue #42"))
+        result = sess.on_tui_frame(self._turn_start("gpt-5.5", prompt="Fix issue #42"))
 
         assert calls == ["Fix issue #42"]
-        assert json.loads(output)["params"]["model"] == "claude-opus-4-8"
+        assert json.loads(result.frame)["params"]["model"] == "claude-opus-4-8"
+        assert result.needs_settings_update
         assert "Task classified as bugfix." in sess.switch_message
 
     def test_maps_selected_uc_gpt_model_and_shows_routing_notice(self):
@@ -415,8 +465,8 @@ class TestInterposerSession:
         )
         frame = self._turn_start("system.ai.gpt-5-6-luna")
 
-        output = sess.on_tui_frame(frame)
-        assert json.loads(output)["params"]["model"] == "gpt-5.6-luna"
+        result = sess.on_tui_frame(frame)
+        assert json.loads(result.frame)["params"]["model"] == "gpt-5.6-luna"
         injected = sess.on_engine_frame(self._turn_started("turn-1"))
 
         assert [message["method"] for message in injected] == [
@@ -445,9 +495,10 @@ class TestInterposerSession:
             switch_message_fn=v2._switch_message,
         )
 
-        output = sess.on_tui_frame(self._turn_start("system.ai.gpt-5-6-sol"))
+        result = sess.on_tui_frame(self._turn_start("system.ai.gpt-5-6-sol"))
 
-        assert json.loads(output)["params"]["model"] == "system.ai.glm-5-2"
+        assert json.loads(result.frame)["params"]["model"] == "system.ai.glm-5-2"
+        assert result.needs_settings_update
         assert "Selected Model : system.ai.glm-5-2" in sess.switch_message
 
     def test_router_failure_keeps_original_model(self):
@@ -458,7 +509,51 @@ class TestInterposerSession:
         )
         frame = self._turn_start("gpt-start")
 
-        assert sess.on_tui_frame(frame) == frame
+        assert sess.on_tui_frame(frame) == codex_interposer.TuiFrameResult(
+            frame, needs_settings_update=False
+        )
+
+    def test_rewrites_nested_collaboration_mode_model(self):
+        """The app-server re-derives the thread model from
+        collaborationMode.settings.model on every turn/start, so the
+        interposer must rewrite that nested field too — not just the
+        top-level ``model`` field."""
+        sess = codex_interposer._Session(
+            None,
+            log=lambda _m: None,
+            route_decision=lambda _p: (
+                codex_interposer.routing.RoutingDecision(
+                    model="gpt-5.6-luna",
+                    raw_model="gpt-5-6-luna",
+                    rationale="trivial",
+                ),
+                None,
+            ),
+            switch_message_fn=v2._switch_message,
+        )
+        frame = json.dumps(
+            {
+                "method": codex_interposer.TURN_START,
+                "id": 1,
+                "params": {
+                    "threadId": "t1",
+                    "input": [{"type": "text", "text": "hello"}],
+                    "model": "gpt-6-astra",
+                    "collaborationMode": {
+                        "mode": "default",
+                        "settings": {
+                            "model": "gpt-6-astra",
+                            "reasoning_effort": "high",
+                        },
+                    },
+                },
+            }
+        )
+        result = sess.on_tui_frame(frame)
+        parsed = json.loads(result.frame)
+        assert parsed["params"]["model"] == "gpt-5.6-luna"
+        assert parsed["params"]["collaborationMode"]["settings"]["model"] == "gpt-5.6-luna"
+        assert result.needs_settings_update
 
 
 def test_routing_request_uses_models_prompt_and_same_token(monkeypatch):
@@ -505,7 +600,7 @@ def test_routing_request_uses_models_prompt_and_same_token(monkeypatch):
         "workspace": WS,
         "token": "same-oauth-token",
         "task": "Fix the parser",
-        "router_name": "task_v1",
+        "router_name": codex_routing.routing.ROUTER_NAME,
         "timeout": codex_routing.REQUEST_TIMEOUT_S,
         "route_options": [
             ("kimi-k3-neo", "codex"),
@@ -525,6 +620,6 @@ def test_routing_request_uses_models_prompt_and_same_token(monkeypatch):
             {"model": "glm-5-2", "harness": "codex"},
         ],
         "task": {"prompt": "Fix the parser"},
-        "route_selector": {"router_name": "task_v1"},
+        "route_selector": {"router_name": codex_routing.routing.ROUTER_NAME},
     }
     assert "same-oauth-token" not in logged[0]

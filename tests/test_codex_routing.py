@@ -78,13 +78,13 @@ def test_routes_with_models_from_stored_state(monkeypatch):
             {"model": "gpt-5-6-sol", "harness": "codex"},
         ],
         "task": {"prompt": task},
-        "route_selector": {"router_name": "task_v1"},
+        "route_selector": {"router_name": codex_routing.routing.ROUTER_NAME},
     }
 
 
-def test_router_name_can_be_selected_with_environment_variable(monkeypatch):
+def test_router_name_can_be_overridden_with_environment_variable(monkeypatch):
     captured = {}
-    monkeypatch.setenv("SMART_ROUTER_NAME", "  task_v2  ")
+    monkeypatch.setenv("SMART_ROUTER_NAME", "  custom_router  ")
 
     def fake_urlopen(request, timeout):
         captured["body"] = json.loads(request.data)
@@ -98,13 +98,13 @@ def test_router_name_can_be_selected_with_environment_variable(monkeypatch):
 
     assert error is None
     assert decision is not None
-    assert captured["body"]["route_selector"] == {"router_name": "task_v2"}
+    assert captured["body"]["route_selector"] == {"router_name": "custom_router"}
 
 
 def test_blank_router_name_environment_variable_uses_default(monkeypatch):
     monkeypatch.setenv("SMART_ROUTER_NAME", "  ")
 
-    assert codex_routing.routing.configured_router_name() == "task_v1"
+    assert codex_routing.routing.configured_router_name() == codex_routing.routing.ROUTER_NAME
 
 
 def test_router_model_is_not_substituted_when_exact_model_is_unavailable():

@@ -714,7 +714,8 @@ class TestUsageCommand:
         assert "Claude Code · Last 7 Days" in headings
         assert all("Gemini" not in heading for heading in headings)
         assert notes == [
-            "Budget spend and threshold are unavailable.",
+            "Budget spend and threshold are unavailable. "
+            "Please configure a coding agent budget policy first.",
             "Using SQL warehouse `wh` (RUNNING).",
             f"No usage for Claude Code in the last {USAGE_BREAKDOWN_DAYS} days.",
         ]

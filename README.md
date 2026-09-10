@@ -14,7 +14,13 @@ GitHub Copilot CLI, and Pi through Databricks.
 ## Installation
 
 ```bash
-uv tool install git+https://github.com/databricks/ucode
+uv tool install git+https://github.com/databricks/unity-gateway
+```
+
+To enable the optional custom-client OAuth flow, install the `custom-oauth` extra:
+
+```bash
+uv tool install "ucode[custom-oauth] @ git+https://github.com/databricks/unity-gateway"
 ```
 
 Check your version with `ug --version`. Between releases this looks like
@@ -58,9 +64,9 @@ ug claude --enable-smart-routing
 ```
 
 The flag applies only to that launch; later launches use normal model selection unless the flag is
-passed again. Smart routing uses the `task_v1` router by default. Power users can select another
+passed again. Smart routing uses the `task_v2` router by default. Power users can select another
 router for a launch by setting `SMART_ROUTER_NAME`, for example
-`SMART_ROUTER_NAME=task_v2 ug codex --enable-smart-routing`.
+`SMART_ROUTER_NAME=task_v1 ug codex --enable-smart-routing`.
 
 To configure all tools at once:
 
@@ -433,8 +439,8 @@ Contributions are welcome.
 ### Getting started
 
 ```bash
-git clone https://github.com/databricks/ucode
-cd ucode
+git clone https://github.com/databricks/unity-gateway
+cd unity-gateway
 uv sync
 ```
 

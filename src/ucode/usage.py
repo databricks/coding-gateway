@@ -797,7 +797,10 @@ def usage(warehouse_id: str | None = None) -> int:
     if budget_lines:
         console.print("\n".join([heading("Usage Budget"), "", *budget_lines]))
     else:
-        print_note("Budget spend and threshold are unavailable.")
+        print_note(
+            "Budget spend and threshold are unavailable. "
+            "Please configure a coding agent budget policy first."
+        )
 
     if not prompt_yes_no_default(
         "Show token usage and estimated cost details? This queries a SQL warehouse.",

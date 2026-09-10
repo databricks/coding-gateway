@@ -25,12 +25,14 @@ dependencies = [
   "mcp>=1.28.0",
   "questionary>=2.0.0",
   "tomlkit>=0.13.0",
-  "typer>=0.12.0",
+  "typer>=0.26.0",
   # enable changing codex model after first prompt
   "websockets>=13",
 ]
 
 [project.optional-dependencies]
+# Custom-client OAuth uses the Databricks SDK's PKCE and token-cache helpers.
+custom-oauth = ["databricks-sdk>=0.135.0"]
 # Only the Claude Code tracing path needs the Python MLflow runtime; OpenCode
 # and Codex trace via JS plugins. Kept out of the core deps so a plain `ucode`
 # install stays lean. Enable with `uv tool install "ucode[tracing]"`.
@@ -59,6 +61,7 @@ fallback-version = "0.0.0"
 
 [dependency-groups]
 dev = [
+    "databricks-sdk>=0.135.0",
     "pytest>=9.0.3",
     "ruff>=0.15.12",
     "ty",

@@ -1,7 +1,7 @@
 """Databricks AI Gateway routing helpers for Claude Code sessions and subagents.
 
 Claude-specific configuration on top of the shared
-:mod:`ucode.smart_routing.routing` core. The ``task_v1`` router infers a
+:mod:`ucode.smart_routing.routing` core. The ``task_v2`` router infers a
 "Claude Code" (``cc``) scenario when it is offered only Claude arms, and that
 scenario REQUIRES its full menu — both ``claude-opus-4-8`` and
 ``claude-sonnet-5`` — or it returns BAD_REQUEST. So both arms are always offered.
@@ -21,7 +21,7 @@ from ucode.smart_routing.routing import RoutingDecision
 
 ROUTER_NAME = routing.ROUTER_NAME
 REQUEST_TIMEOUT_S = routing.REQUEST_TIMEOUT_S
-# Frozen task_v1 "cc" scenario menu (ai-gateway CanonicalModelNames): the router
+# Frozen task_v2 "cc" scenario menu (ai-gateway CanonicalModelNames): the router
 # rejects the request unless BOTH are offered as route_options.
 CLAUDE_ROUTE_ARMS = ("claude-opus-4-8", "claude-sonnet-5")
 # Claude Code's subagent-spawn tool (renamed Task -> Agent); match both.

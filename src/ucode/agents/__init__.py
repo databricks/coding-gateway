@@ -41,6 +41,7 @@ from ucode.ui import (
 )
 
 from . import claude, codex, copilot, gemini, opencode, pi
+from .args import LaunchOptions as LaunchOptions
 from .args import explicit_model_arg_value as explicit_model_arg_value
 
 _MODULES = {
@@ -73,6 +74,10 @@ TOOL_ALIASES = {
 DEFAULT_TOOL = "codex"
 BUNDLE_VERSION = 1
 _MANAGED_SETTINGS_TOOLS = {"claude", "codex"}
+_NATIVE_UPGRADE_COMMANDS = {
+    "claude": ["claude", "upgrade"],
+    "codex": ["codex", "update"],
+}
 
 # ucode tool -> `databricks aitools` agent id. gemini/pi aren't supported.
 AITOOLS_AGENT_TOKENS = {
@@ -111,14 +116,18 @@ def _update_installed_tool_binary(tool: str, version: str | None = None) -> bool
     package = spec["package"]
     target = f"{package}@{version}" if version else package
 
-    if not shutil.which("npm"):
-        print_warning(f"`npm` is not available to update {spec['display']}; continuing.")
-        return False
+    if tool in _NATIVE_UPGRADE_COMMANDS and version is None and shutil.which(binary):
+        command = _NATIVE_UPGRADE_COMMANDS[tool]
+    else:
+        if not shutil.which("npm"):
+            print_warning(f"`npm` is not available to update {spec['display']}; continuing.")
+            return False
+        command = ["npm", "install", "-g", target]
 
-    print_note(f"Updating {spec['display']}...")
+    print_note(f"Upgrading {spec['display']}...")
     try:
-        subprocess.run(["npm", "install", "-g", target], check=True, timeout=300)
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        subprocess.run(command, check=True, timeout=300)
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         print_warning(f"Could not update {spec['display']}; continuing.")
         return False
 
@@ -129,13 +138,6 @@ def _update_installed_tool_binary(tool: str, version: str | None = None) -> bool
 
 def _minimum_version_error(tool: str) -> str | None:
     checker = getattr(_MODULES[tool], "minimum_version_error", None)
-    if not callable(checker):
-        return None
-    return checker()
-
-
-def _required_update_message(tool: str) -> str | None:
-    checker = getattr(_MODULES[tool], "required_update_message", None)
     if not callable(checker):
         return None
     return checker()
@@ -189,16 +191,20 @@ def install_tool_binary(
         # against the gateway), so check it on every launch — not just when
         # auto-configuring — mirroring the minimum-version gate below.
         too_new = _maybe_downgrade_too_new_tool(tool, prompt=prompt_optional_updates)
-
-        if update_existing and not too_new:
-            required_update = _required_update_message(tool)
-            if required_update:
-                # Required updates are forced regardless of prompt preference;
-                # the tool won't function on an unsupported version.
-                print_warning(required_update)
-                if not _update_installed_tool_binary(tool):
-                    raise RuntimeError(_minimum_version_error(tool) or required_update)
         version_error = _minimum_version_error(tool)
+
+        should_update = update_existing or tool in _NATIVE_UPGRADE_COMMANDS
+        if should_update and not too_new and version_error:
+            print_warning(version_error)
+            if (
+                tool in _NATIVE_UPGRADE_COMMANDS
+                and prompt_optional_updates
+                and not prompt_yes_no(f"Upgrade {spec['display']} if available?")
+            ):
+                raise RuntimeError(version_error)
+            if not _update_installed_tool_binary(tool):
+                raise RuntimeError(version_error)
+            version_error = _minimum_version_error(tool)
         if version_error:
             raise RuntimeError(version_error)
         return True
@@ -251,6 +257,8 @@ def tool_binary_installed(tool: str) -> bool:
 def tool_update_available(tool: str) -> tuple[str, str] | None:
     """Return ``(current, latest)`` when a newer agent CLI is published, else None.
     Read-only wrapper over the npm update check — for ``ucode doctor``."""
+    if tool in _NATIVE_UPGRADE_COMMANDS:
+        return None
     checker = getattr(_MODULES[tool], "is_update_available", None)
     if callable(checker):
         return checker()
@@ -261,6 +269,16 @@ def update_tool_binary(tool: str) -> bool:
     """Install the latest agent CLI, returning True on success. Public entry
     point over the internal updater so ``ucode doctor`` can apply the fix."""
     return _update_installed_tool_binary(tool)
+
+
+def tool_uses_native_updater(tool: str) -> bool:
+    """Whether upgrades are resolved and installed entirely by the agent CLI."""
+    return tool in _NATIVE_UPGRADE_COMMANDS
+
+
+def tool_version_error(tool: str) -> str | None:
+    """Return an active minimum-version blocker for a configured agent."""
+    return _minimum_version_error(tool)
 
 
 def tracing_mlflow_ok() -> bool:
@@ -415,8 +433,7 @@ def configure_tool(
     elif tool == "claude":
         # A Model Provider Service routes by header and pins no Databricks
         # model, so the usual "model required" guard doesn't apply to claude.
-        # `custom_model` (from `ucode claude --model`) likewise supplies the model.
-        if not model and not provider and not custom_model:
+        if not model and not provider:
             raise RuntimeError(f"A {tool} model must be selected before configuration.")
         result = claude.write_tool_config(
             state,
@@ -447,8 +464,14 @@ def configure_tool(
     return result
 
 
-def launch(tool: str, state: dict, tool_args: list[str]) -> None:
-    _MODULES[tool].launch(state, tool_args)
+def launch(
+    tool: str,
+    state: dict,
+    tool_args: list[str],
+    *,
+    options: LaunchOptions,
+) -> None:
+    _MODULES[tool].launch(state, tool_args, options=options)
 
 
 def check_gateway_endpoint(state: dict, tool: str) -> bool:

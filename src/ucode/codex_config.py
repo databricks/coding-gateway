@@ -2,20 +2,30 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import tomlkit
+from tomlkit.items import Item
 
 
-def _toml_value(value: str | int | float | bool | list[object] | dict[str, object]) -> str:
-    if isinstance(value, dict):
-        item = tomlkit.inline_table()
-        item.update(value)
-        return item.as_string()
-    if isinstance(value, list) and any(isinstance(entry, dict) for entry in value):
-        wrapper = tomlkit.inline_table()
-        wrapper["value"] = value
-        rendered = wrapper.as_string()
-        return rendered.removeprefix("{value = ").removesuffix("}")
-    return tomlkit.item(value).as_string()
+def _toml_item(value: object) -> Item:
+    if isinstance(value, Mapping):
+        inline = tomlkit.inline_table()
+        for key, child in value.items():
+            inline[str(key)] = _toml_item(child)
+        return inline
+    if isinstance(value, list):
+        array = tomlkit.array()
+        for child in value:
+            array.append(_toml_item(child))
+        return array
+    if isinstance(value, Item):
+        return value
+    return tomlkit.item(value)
+
+
+def _toml_value(value: object) -> str:
+    return _toml_item(value).as_string()
 
 
 def codex_config_args(config: dict) -> list[str]:

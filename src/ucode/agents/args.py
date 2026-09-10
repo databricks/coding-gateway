@@ -2,6 +2,18 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class LaunchOptions:
+    """Invocation-scoped options shared by agent launchers."""
+
+    launch_smart_routing: bool = False
+    # Claude's --model is consumed by ucode, so it must be passed separately for this launch.
+    # Codex keeps --model in the forwarded tool arguments instead.
+    claude_launch_model: str | None = None
+
 
 def explicit_model_arg_value(tool_args: list[str]) -> str | None:
     """Return the last model selected before the harness's ``--`` separator."""

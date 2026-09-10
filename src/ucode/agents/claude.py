@@ -25,6 +25,7 @@ from ucode.config_io import (
     write_json_file,
 )
 from ucode.constants import LOOPBACK_HOST
+from ucode.custom_oauth import CustomOAuthConfig, build_custom_auth_shell_command
 from ucode.databricks import (
     build_auth_shell_command,
     build_tool_base_url,
@@ -48,13 +49,12 @@ from ucode.smart_routing.claude_hooks import (
     remove_smart_routing_hooks,
     sync_smart_routing_hooks,
 )
-from ucode.smart_routing.claude_routing import CLAUDE_VALUE_OPTIONS
 from ucode.state import MANAGED_OVERLAY_KEY, get_provider_service, mark_tool_managed, save_state
 from ucode.telemetry import agent_version, ucode_version
 from ucode.tracing import tracing_env
 from ucode.ui import print_note, print_success, print_warning
 
-from .args import has_explicit_model_arg
+from .args import LaunchOptions, has_explicit_model_arg
 
 GATEWAY_MODEL_DISCOVERY_ENV_VAR = "ENABLE_CLAUDE_CODE_GATEWAY_MODEL_DISCOVERY"
 CLAUDE_CONFIG_DIR = Path.home() / ".claude"
@@ -77,26 +77,6 @@ SPEC: ToolSpec = {
 
 # Retained only to identify and remove state written by the legacy persisted opt-in.
 SMART_ROUTING_STATE_KEY = smart_routing_v2.LEGACY_STATE_KEY
-CLAUDE_NONINTERACTIVE_FLAGS = frozenset(
-    {"-p", "--print", "--bg", "--background", "--cloud", "-h", "--help", "-v", "--version"}
-)
-CLAUDE_SUBCOMMANDS = frozenset(
-    {"agents", "auth", "config", "doctor", "install", "mcp", "plugin", "setup-token", "update"}
-)
-CLAUDE_OPTIONAL_VALUE_OPTIONS = frozenset(
-    {
-        "-d",
-        "--debug",
-        "--from-pr",
-        "--prompt-suggestions",
-        "-r",
-        "--resume",
-        "--remote-control",
-        "--teleport",
-        "-w",
-        "--worktree",
-    }
-)
 
 
 def _parse_version(value: str) -> tuple[int, int, int] | None:
@@ -105,16 +85,6 @@ def _parse_version(value: str) -> tuple[int, int, int] | None:
         return None
     major, minor, patch = match.groups()
     return int(major), int(minor), int(patch)
-
-
-def _installed_version_status() -> tuple[str, bool] | None:
-    if os.environ.get(GATEWAY_MODEL_DISCOVERY_ENV_VAR) != "1" and not smart_routing_v2.enabled():
-        return None
-    version = agent_version(SPEC["binary"])
-    parsed = _parse_version(version)
-    if parsed is None:
-        return None
-    return version, parsed < MINIMUM_CLAUDE_VERSION
 
 
 def _minimum_version_requirement_message(version: str) -> str:
@@ -126,21 +96,11 @@ def _minimum_version_requirement_message(version: str) -> str:
 
 
 def minimum_version_error() -> str | None:
-    status = _installed_version_status()
-    if status is None:
+    if os.environ.get(GATEWAY_MODEL_DISCOVERY_ENV_VAR) != "1" and not smart_routing_v2.enabled():
         return None
-    version, is_too_old = status
-    if not is_too_old:
-        return None
-    return _minimum_version_requirement_message(version)
-
-
-def required_update_message() -> str | None:
-    status = _installed_version_status()
-    if status is None:
-        return None
-    version, is_too_old = status
-    if not is_too_old:
+    version = agent_version(SPEC["binary"])
+    parsed = _parse_version(version)
+    if parsed is None or parsed >= MINIMUM_CLAUDE_VERSION:
         return None
     return _minimum_version_requirement_message(version)
 
@@ -353,6 +313,7 @@ def render_overlay(
     disable_web_search: bool = False,
     profile: str | None = None,
     use_pat: bool = False,
+    custom_oauth: CustomOAuthConfig | None = None,
     provider: str | None = None,
     provider_models: dict[str, str] | None = None,
     fable_enabled: bool = False,
@@ -425,19 +386,6 @@ def render_overlay(
     _ = model  # API stability; no longer pinned via env.
     if route_root_model:
         env["ANTHROPIC_MODEL"] = route_root_model
-    # `ucode claude --model <id>` pins an arbitrary Databricks model id for this launch. It CANNOT
-    # go in ANTHROPIC_MODEL: Claude Code validates that value client-side against the models it knows
-    # (via the apiKeyHelper auth path ucode uses) and rejects a raw id with "may not exist ... run
-    # /model". The family-alias vars (ANTHROPIC_DEFAULT_*_MODEL) are passed through unchecked, so pin
-    # the id into all of them — a raw id carries no signal of its family (opus/sonnet/haiku), and
-    # overriding every slot makes the model take effect no matter which one Claude Code resolves
-    # (root session, a tier switch, or a subagent). Wins over the discovered-model aliases below.
-    if custom_model and not provider:
-        env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = custom_model
-        env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = custom_model
-        env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = custom_model
-        if fable_enabled:
-            env["ANTHROPIC_DEFAULT_FABLE_MODEL"] = custom_model
     # A Bedrock-backed provider needs its provider-side ids pinned verbatim
     # (Claude Code's canonical names aren't routable there). These come from the
     # service's targets, already de-duped to one id per family upstream.
@@ -477,7 +425,10 @@ def render_overlay(
     if relayed:
         keys = [["env", k] for k in env]
     else:
-        overlay["apiKeyHelper"] = build_auth_shell_command(workspace, profile, use_pat=use_pat)
+        if custom_oauth:
+            overlay["apiKeyHelper"] = build_custom_auth_shell_command(workspace, custom_oauth)
+        else:
+            overlay["apiKeyHelper"] = build_auth_shell_command(workspace, profile, use_pat=use_pat)
         keys = [["apiKeyHelper"]] + [["env", k] for k in env]
 
     # Disable Claude Code's built-in WebSearch: it declares Anthropic's hosted
@@ -634,6 +585,7 @@ def write_tool_config(
         disable_web_search=web_search_model is not None,
         profile=state.get("profile"),
         use_pat=bool(state.get("use_pat")),
+        custom_oauth=state.get("custom_oauth"),
         provider=provider,
         provider_models=provider_models,
         fable_enabled=bool(state.get("fable_enabled")),
@@ -839,6 +791,9 @@ def _reconcile_managed_settings(
     The managed file is root-owned and the highest-precedence scope, so every normal Claude
     configuration mirrors ucode's settings there. The same compose operation that produced the
     private file is applied to the existing managed file, preserving unrelated IT-authored keys.
+
+    `ug configure` updates gateway-owned fields in this file, but does not generate or modify
+    the `modelPicker` object; an existing picker is retained by the merge.
 
     Relayed launches are skipped: they depend on a per-session loopback refresh proxy that only runs
     during `ucode claude`, so a bare `claude` could not reach the gateway anyway.
@@ -1195,43 +1150,11 @@ def _original_launch_model(state: dict) -> str | None:
     return default_model(state)
 
 
-def _has_launch_model_override(state: dict) -> bool:
-    override = state.get("_claude_launch_model")
-    return isinstance(override, str) and bool(override.strip())
-
-
 def _has_provider_launch(state: dict) -> bool:
     transient = state.get("_claude_launch_provider")
     return (isinstance(transient, str) and bool(transient.strip())) or bool(
         get_provider_service(state, "claude")
     )
-
-
-def _uses_interactive_tui(tool_args: list[str]) -> bool:
-    if any(arg in CLAUDE_NONINTERACTIVE_FLAGS for arg in tool_args):
-        return False
-
-    index = 0
-    while index < len(tool_args):
-        arg = tool_args[index]
-        if arg == "--":
-            return True
-        if arg in CLAUDE_VALUE_OPTIONS:
-            index += 2
-            continue
-        if arg in CLAUDE_OPTIONAL_VALUE_OPTIONS:
-            if index + 1 < len(tool_args) and not tool_args[index + 1].startswith("-"):
-                index += 2
-            else:
-                index += 1
-            continue
-        if arg.startswith("-"):
-            index += 1
-            continue
-        # Claude accepts an initial prompt positionally and still opens the TUI.
-        # Keep prompts inside the V2 PTY while bypassing utility subcommands.
-        return arg not in CLAUDE_SUBCOMMANDS
-    return True
 
 
 def _launch_model_args(tool_args: list[str], launch_model: str | None) -> list[str]:
@@ -1377,27 +1300,24 @@ def _launch_relayed(state: dict, binary: str, tool_args: list[str]) -> None:
     raise SystemExit(returncode)
 
 
-def launch(state: dict, tool_args: list[str]) -> None:
+def launch(
+    state: dict,
+    tool_args: list[str],
+    *,
+    options: LaunchOptions,
+) -> None:
     binary = SPEC["binary"]
     workspace = state.get("workspace")
     if state.get("claude_relayed"):
         _launch_relayed(state, binary, tool_args)
         return
-    first_prompt_routing = (
-        smart_routing_v2.enabled()
-        and bool(workspace)
-        and not _has_launch_model_override(state)
-        and not has_explicit_model_arg(tool_args)
-        and not _has_provider_launch(state)
-        and _uses_interactive_tui(tool_args)
-    )
     # Smart routing v2 needs Unix PTY support, which Windows does not provide.
-    if first_prompt_routing and os.name == "nt":
+    if options.launch_smart_routing and os.name == "nt":
         raise RuntimeError(
             "Smart routing in Claude Code is currently not supported on Windows. "
             "Please use Codex or disable smart routing."
         )
-    if first_prompt_routing:
+    if options.launch_smart_routing:
         smart_routing_v2.launch_claude(
             state,
             tool_args,
@@ -1419,6 +1339,8 @@ def launch(state: dict, tool_args: list[str]) -> None:
         os.environ["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
     if workspace:
         os.environ["OAUTH_TOKEN"] = get_databricks_token(workspace, state.get("profile"))
+    if options.claude_launch_model:
+        os.environ["ANTHROPIC_MODEL"] = options.claude_launch_model
     exec_or_spawn(_build_claude_argv(binary, tool_args))
 
 

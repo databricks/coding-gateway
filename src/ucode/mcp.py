@@ -1172,63 +1172,6 @@ def apply_managed_mcp_servers(
     return working
 
 
-def apply_managed_skills(
-    state: dict,
-    managed: dict,
-    tool: str,
-    workspace: str,
-    profile: str | None = None,
-    *,
-    use_pat: bool = False,
-) -> list[str]:
-    """Register the managed config's skill schemas on ``tool``'s skills MCP connection.
-
-    The managed config lists skill schemas the admin published as ``catalog.schema`` locations under
-    ``skills.names``; nothing else on the launch path routes them to the agent, so without this a
-    workspace-published skill schema never reaches the agent's skills registry. Merges them into the
-    developer's own ``skill_locations`` (preserving those), diffs against what ucode applied on a
-    prior launch — tracked under ``managed_skill_locations`` — so a schema the admin later drops is
-    removed, and registers the single skills connection for the launching tool.
-
-    Mutates and persists ``state`` in place (the skills connection lives in ``state['mcp_servers']``).
-    Returns the managed locations applied (for the caller's note), or ``[]`` when nothing changed —
-    the config names none and none were applied before, or the connection was already current.
-
-    When the admin drops their last schema and the developer configured none of their own, the
-    connection is rebuilt with no ``skill_locations`` (the schema-less, utility-only form), matching
-    ``configure skills --mcp`` with no location, rather than being removed outright.
-    """
-    if tool not in MCP_CLIENTS:
-        return []
-    desired = [
-        loc
-        for loc in ((managed.get("skills") or {}).get("names") or [])
-        if isinstance(loc, str) and loc
-    ]
-    prev_managed = [
-        loc for loc in (state.get("managed_skill_locations") or []) if isinstance(loc, str) and loc
-    ]
-    if not desired and not prev_managed:
-        return []
-    # Preserve the developer's own locations, drop previously-managed ones no longer in the config,
-    # and add the current managed set. dict.fromkeys dedupes while keeping first-seen order.
-    current = _skill_mcp_locations(state)
-    developer_own = [loc for loc in current if loc not in prev_managed]
-    new_locations = list(dict.fromkeys([*developer_own, *desired]))
-
-    original = list(state.get("mcp_servers") or [])
-    working = _resolve_skills_mcp_servers(workspace, [tool], new_locations, original)
-    changed = apply_mcp_server_changes(
-        original, working, [tool], workspace, profile, use_pat=use_pat
-    )
-    if not (changed or original != working or prev_managed != desired):
-        return []
-    state["mcp_servers"] = working
-    state["managed_skill_locations"] = desired
-    save_state(state)
-    return desired
-
-
 def _resolve_mcp_selection(
     selection: str,
     workspace: str,

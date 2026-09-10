@@ -24,7 +24,7 @@ class _Response:
         return json.dumps(self.payload).encode("utf-8")
 
 
-def test_routes_with_task_v1_claude_menu(monkeypatch):
+def test_routes_with_default_claude_menu(monkeypatch):
     monkeypatch.delenv("SMART_ROUTER_NAME", raising=False)
     captured = {}
 
@@ -66,7 +66,7 @@ def test_routes_with_task_v1_claude_menu(monkeypatch):
             {"model": "claude-sonnet-5", "harness": "claude"},
         ],
         "task": {"prompt": "Refactor the parser"},
-        "route_selector": {"router_name": "task_v1"},
+        "route_selector": {"router_name": claude_routing.ROUTER_NAME},
     }
 
 

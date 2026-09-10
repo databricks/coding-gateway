@@ -20,6 +20,8 @@ from ucode.agents import (
     ensure_tracing_mlflow_cli,
     tool_binary_installed,
     tool_update_available,
+    tool_uses_native_updater,
+    tool_version_error,
     tracing_mlflow_ok,
     update_tool_binary,
 )
@@ -50,7 +52,7 @@ from ucode.ui import (
 # warns when its own token and one of these are both set, so we surface them.
 _CLAUDE_TOKEN_ENV_VARS = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")
 
-UCODE_GIT_URL = "git+https://github.com/databricks/ucode"
+UCODE_GIT_URL = "git+https://github.com/databricks/unity-gateway"
 
 # status -> (glyph, status_badge kind). "info" is a healthy line that still
 # carries an optional suggestion (e.g. the ucode self-upgrade).
@@ -167,6 +169,23 @@ def _check_agent_clis() -> list[Check]:
                     Suggestion(f"Install {display}?", lambda t=tool: update_tool_binary(t)),
                 )
             )
+            continue
+        if tool_uses_native_updater(tool):
+            blocker = tool_version_error(tool)
+            if blocker:
+                checks.append(
+                    Check(
+                        display,
+                        "warn",
+                        blocker,
+                        Suggestion(
+                            f"Upgrade {display} if available?",
+                            lambda t=tool: update_tool_binary(t),
+                        ),
+                    )
+                )
+            else:
+                checks.append(Check(display, "ok", "installed; upgrades managed by agent CLI"))
             continue
         with spinner(f"Checking {display} for updates..."):
             update = tool_update_available(tool)

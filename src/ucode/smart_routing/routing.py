@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-ROUTER_NAME = "task_v1"
+ROUTER_NAME = "task_v2"
 ROUTER_NAME_ENV_VAR = "SMART_ROUTER_NAME"
 ROUTING_PATH = "/ai-gateway/routing/v1/routes:select"
 REQUEST_TIMEOUT_S = 30.0
@@ -100,7 +100,7 @@ def normalize_model(model: str) -> str:
 
 
 def configured_router_name() -> str:
-    """Return the environment-selected router, falling back to ``task_v1``."""
+    """Return the environment-selected router, falling back to ``task_v2``."""
     return os.environ.get(ROUTER_NAME_ENV_VAR, "").strip() or ROUTER_NAME
 
 

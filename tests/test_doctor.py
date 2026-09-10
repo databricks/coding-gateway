@@ -111,7 +111,7 @@ class TestAgentCliChecks:
         assert checks[0].suggestion is not None
 
     def test_outdated_offers_update(self):
-        state = {"available_tools": ["claude"]}
+        state = {"available_tools": ["opencode"]}
         with (
             patch.object(doctor_mod, "load_state", return_value=state),
             patch.object(doctor_mod, "tool_binary_installed", return_value=True),
@@ -127,11 +127,30 @@ class TestAgentCliChecks:
         with (
             patch.object(doctor_mod, "load_state", return_value=state),
             patch.object(doctor_mod, "tool_binary_installed", return_value=True),
-            patch.object(doctor_mod, "tool_update_available", return_value=None),
+            patch.object(doctor_mod, "tool_version_error", return_value=None),
+            patch.object(
+                doctor_mod,
+                "tool_update_available",
+                side_effect=AssertionError("native updater must not use npm detection"),
+            ),
         ):
             checks = _check_agent_clis()
         assert checks[0].status == "ok"
+        assert "agent CLI" in checks[0].detail
         assert checks[0].suggestion is None
+
+    def test_blocked_native_agent_offers_native_upgrade(self):
+        state = {"available_tools": ["claude"]}
+        with (
+            patch.object(doctor_mod, "load_state", return_value=state),
+            patch.object(doctor_mod, "tool_binary_installed", return_value=True),
+            patch.object(doctor_mod, "tool_version_error", return_value="version too old"),
+        ):
+            checks = _check_agent_clis()
+        assert checks[0].status == "warn"
+        assert checks[0].detail == "version too old"
+        assert checks[0].suggestion is not None
+        assert checks[0].suggestion.prompt == "Upgrade Claude Code if available?"
 
     def test_unknown_tool_is_skipped(self):
         state = {"available_tools": ["not-a-real-tool"]}
@@ -229,6 +248,26 @@ class TestTracingMlflowCheck:
             check = _check_tracing_mlflow()
         assert check.status == "warn"
         assert check.suggestion is not None
+
+
+class TestUcodeCheck:
+    def test_upgrade_uses_renamed_repository(self):
+        with (
+            patch.object(doctor_mod.shutil, "which", return_value="/usr/bin/uv"),
+            patch.object(doctor_mod.subprocess, "run") as run,
+        ):
+            assert doctor_mod._upgrade_ucode()
+
+        run.assert_called_once_with(
+            [
+                "uv",
+                "tool",
+                "install",
+                "--reinstall",
+                "git+https://github.com/databricks/unity-gateway",
+            ],
+            check=True,
+        )
 
 
 class TestDoctorFlow:

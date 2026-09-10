@@ -34,10 +34,11 @@ especially confusing -- the user needs to be told to re-run
 from __future__ import annotations
 
 import sys
-from types import ModuleType
+from collections.abc import AsyncIterator
+from types import ModuleType, TracebackType
+from typing import Protocol, Self
 
 import anyio
-from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from mcp.client.streamable_http import streamable_http_client
 from mcp.server.stdio import stdio_server
 
@@ -79,6 +80,28 @@ class ProxyTransportError(RuntimeError):
     """The upstream MCP transport failed or closed unexpectedly."""
 
 
+class _ReceiveStream[T](Protocol):
+    def __aiter__(self) -> AsyncIterator[T]: ...
+    async def __aenter__(self) -> Self: ...
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> bool | None: ...
+
+
+class _SendStream[T](Protocol):
+    async def send(self, item: T, /) -> None: ...
+    async def __aenter__(self) -> Self: ...
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> bool | None: ...
+
+
 def _fail_fast(message: str) -> None:
     """Report a terminal proxy failure on stderr and exit non-zero.
 
@@ -116,9 +139,9 @@ def _build_token_auth(workspace: str, profile: str | None):
     return _DatabricksTokenAuth()
 
 
-async def _pump(
-    source: MemoryObjectReceiveStream,
-    dest: MemoryObjectSendStream,
+async def _pump[T](
+    source: _ReceiveStream[T],
+    dest: _SendStream[T],
 ) -> None:
     """Forward every message from ``source`` to ``dest``.
 
@@ -129,9 +152,9 @@ async def _pump(
             await dest.send(message)
 
 
-async def _pump_upstream(
-    source: MemoryObjectReceiveStream,
-    dest: MemoryObjectSendStream,
+async def _pump_upstream[T](
+    source: _ReceiveStream[T | Exception],
+    dest: _SendStream[T],
 ) -> None:
     """Forward upstream messages, failing if the transport closes first."""
     async with source, dest:

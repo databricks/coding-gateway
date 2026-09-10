@@ -18,12 +18,14 @@ from ucode.config_io import (
     backup_existing_file,
     deep_merge_dict,
     read_toml_safe,
+    write_json_file,
     write_toml_file,
 )
 from ucode.custom_oauth import CustomOAuthConfig, build_custom_auth_token_argv
 from ucode.databricks import (
     build_auth_token_argv,
     build_tool_base_url,
+    fetch_codex_mps_model_catalog,
     get_databricks_token,
 )
 from ucode.launcher import exec_or_spawn
@@ -46,7 +48,7 @@ from ucode.smart_routing.codex_hooks import (
     sync_smart_routing_hooks,
 )
 from ucode.smart_routing.codex_routing import codex_model_id
-from ucode.state import mark_tool_managed, save_state
+from ucode.state import get_provider_service, mark_tool_managed, save_state
 from ucode.telemetry import agent_version, ucode_version
 from ucode.ui import print_warning_err
 
@@ -56,6 +58,7 @@ CODEX_CONFIG_DIR = Path.home() / ".codex"
 CODEX_PROFILE_NAME = "ucode"
 CODEX_CONFIG_PATH = CODEX_CONFIG_DIR / f"{CODEX_PROFILE_NAME}.config.toml"
 CODEX_BACKUP_PATH = APP_DIR / "codex-ucode-config.backup.toml"
+CODEX_MPS_MODEL_CATALOG_PATH = APP_DIR / "codex-mps-model-catalog.json"
 LEGACY_CODEX_CONFIG_PATH = CODEX_CONFIG_DIR / "config.toml"
 LEGACY_CODEX_BACKUP_PATH = APP_DIR / "codex-config.backup.toml"
 CODEX_MODEL_PROVIDER_NAME = "ucode-databricks"
@@ -509,8 +512,16 @@ def launch(
     clear_model_preferences(state)
     binary = SPEC["binary"]
     workspace = state.get("workspace")
+    launch_provider = state.get("_codex_launch_provider")
+    provider = (
+        launch_provider.strip()
+        if isinstance(launch_provider, str) and launch_provider.strip()
+        else get_provider_service(state, "codex")
+    )
+    token = None
     if workspace:
-        os.environ["OAUTH_TOKEN"] = get_databricks_token(workspace, state.get("profile"))
+        token = get_databricks_token(workspace, state.get("profile"))
+        os.environ["OAUTH_TOKEN"] = token
     # Layer ucode's named profile as ordinary config overrides. Unlike
     # `--profile`, `--config` is accepted by runtime, utility, and server
     # commands, so every invocation keeps the same Databricks settings without
@@ -521,6 +532,10 @@ def launch(
             f"Cannot launch Codex with the ucode profile because {CODEX_CONFIG_PATH} "
             "is missing or empty. Run `ucode configure --agents codex` first."
         )
+    if workspace and token and provider:
+        catalog = fetch_codex_mps_model_catalog(workspace, token, provider)
+        write_json_file(CODEX_MPS_MODEL_CATALOG_PATH, catalog)
+        profile_doc["model_catalog_json"] = str(CODEX_MPS_MODEL_CATALOG_PATH)
     exec_or_spawn([binary, *codex_config_args(profile_doc), *tool_args])
 
 

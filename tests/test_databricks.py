@@ -62,6 +62,31 @@ class _FakeResponse:
         return self._body
 
 
+class TestFetchCodexMpsModelCatalog:
+    def test_sends_provider_header(self, monkeypatch):
+        seen = {}
+
+        def fake_get(url, token, **kwargs):
+            seen.update(url=url, token=token, **kwargs)
+            return {"models": [{"slug": "gpt-mps"}]}, None
+
+        monkeypatch.setattr(db_mod, "_http_get_json", fake_get)
+
+        result = db_mod.fetch_codex_mps_model_catalog(WS, "tok", "main.default.openai")
+
+        assert result["models"][0]["slug"] == "gpt-mps"
+        assert seen["url"] == f"{WS}/ai-gateway/codex/v1/models"
+        assert seen["headers"] == {"Databricks-Model-Provider-Service": "main.default.openai"}
+
+    def test_rejects_empty_catalog(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda *args, **kwargs: ({"models": []}, None)
+        )
+
+        with pytest.raises(RuntimeError, match="returned no Codex models"):
+            db_mod.fetch_codex_mps_model_catalog(WS, "tok", "main.default.openai")
+
+
 class TestWorkspaceHostname:
     def test_extracts_hostname(self):
         assert workspace_hostname(WS) == "example.databricks.com"

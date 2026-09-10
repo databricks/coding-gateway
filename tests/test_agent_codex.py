@@ -611,6 +611,26 @@ class TestCodexLaunch:
         assert os.environ["OAUTH_TOKEN"] == "fresh-token"
         assert launches[0][-1] == "--search"
 
+    def test_provider_discovery_uses_authoritative_catalog(self, tmp_path, monkeypatch):
+        launches = self._patch(tmp_path, monkeypatch)
+        catalog_path = tmp_path / "models.json"
+        catalog = {"models": [{"slug": "gpt-mps"}]}
+        monkeypatch.setattr(codex, "CODEX_MPS_MODEL_CATALOG_PATH", catalog_path)
+        monkeypatch.setattr(
+            codex,
+            "fetch_codex_mps_model_catalog",
+            lambda workspace, token, provider: catalog,
+        )
+
+        codex.launch(
+            {"workspace": WS, "_codex_launch_provider": "main.default.openai"},
+            [],
+            options=LaunchOptions(),
+        )
+
+        assert catalog_path.exists()
+        assert f'model_catalog_json="{catalog_path}"' in launches[0]
+
     @pytest.mark.parametrize(
         "tool_args",
         [

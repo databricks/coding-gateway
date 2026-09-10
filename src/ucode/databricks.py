@@ -1389,6 +1389,34 @@ def _extract_apps_payload(payload: object) -> list[dict]:
     raise RuntimeError("Databricks apps listing returned invalid JSON.")
 
 
+class PermissionDeniedError(RuntimeError):
+    """A workspace API returned an authorization failure (HTTP 403 / permission denied).
+
+    Callers use this only to skip V2 MCP discovery gracefully instead of aborting setup (see the
+    discovery wrappers in :mod:`ucode.mcp`), while other errors still surface.
+
+    It deliberately does NOT try to distinguish a consumer-only identity (no `workspace-access`
+    entitlement) from a workspace user missing a grant on a specific resource: no service exposes
+    a signal that reliably tells them apart. The `workspace-access` entitlement is enforced with a
+    named 403 only on guarded AI Gateway / Model Serving *inference* and model-listing paths (which
+    ucode already exercises at model setup, so a consumer is gated there) — NOT on the Apps / UC /
+    Vector Search listing calls the MCP flow uses, which return an empty list or a generic ACL
+    denial for a consumer."""
+
+
+def _looks_like_cli_permission_error(stderr: str | None) -> bool:
+    """Whether a Databricks CLI stderr indicates an authorization failure.
+
+    The CLI exit code is generic, so we match on the stable markers the CLI/API emit
+    for a denied workspace call rather than the status alone."""
+    if not stderr:
+        return False
+    lowered = stderr.lower()
+    if "permission" in lowered and ("denied" in lowered or "insufficient" in lowered):
+        return True
+    return "403" in lowered or "not authorized" in lowered or "unauthorized" in lowered
+
+
 def list_databricks_apps(workspace: str, profile: str | None = None) -> list[dict]:
     env = build_databricks_cli_env(workspace)
     try:
@@ -1410,6 +1438,11 @@ def list_databricks_apps(workspace: str, profile: str | None = None) -> list[dic
         )
         return _extract_apps_payload(json.loads(result.stdout or "[]"))
     except subprocess.CalledProcessError as exc:
+        # A 403 here means the caller isn't authorized to list apps (a consumer-only identity, or
+        # a workspace user without apps permission); raise PermissionDeniedError so callers can skip
+        # discovery gracefully (AIGTWY-4471). Other CLI failures stay hard errors.
+        if _looks_like_cli_permission_error(exc.stderr):
+            raise PermissionDeniedError("Not authorized to list Databricks apps.") from exc
         raise RuntimeError("Failed to list Databricks apps via `databricks apps list`.") from exc
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("Timed out while listing Databricks apps.") from exc
@@ -2764,6 +2797,7 @@ def list_all_mcp_services(
     *,
     deadline_seconds: float = _MCP_SERVICES_WALK_DEADLINE_SECONDS,
     on_progress: Callable[[int, int, int], None] | None = None,
+    on_services: Callable[[list[str]], None] | None = None,
 ) -> tuple[list[str], str | None]:
     """Return sorted unique MCP-service full names across every `<catalog>.<schema>`
     in the workspace. The mcp-services API is one-schema-per-call, so this walks
@@ -2772,7 +2806,10 @@ def list_all_mcp_services(
 
     `on_progress`, if given, is called as each schema's listing completes with
     `(schemas_done, schemas_total, services_found)` so callers can render a live
-    count. It is invoked serially from the draining thread (not the workers).
+    count. `on_services`, if given, is called with each schema's newly-found service
+    names (deduped against everything emitted so far) so callers can stream results
+    into a picker as the walk progresses instead of waiting for the full result. Both
+    are invoked serially from the draining thread (not the workers).
 
     This walk is the slow, workspace-wide counterpart to `list_mcp_services`
     (single schema)."""
@@ -2848,10 +2885,13 @@ def list_all_mcp_services(
         def collect_services(result, _ref):
             nonlocal schemas_done
             found, _ = result
+            new = [n for n in found if n not in names]
             names.update(found)
             schemas_done += 1
             if on_progress is not None:
                 on_progress(schemas_done, schemas_total, len(names))
+            if on_services is not None and new:
+                on_services(sorted(new))
 
         _drain_with_deadline(service_futures, deadline, collect_services)
         pool.shutdown(wait=False, cancel_futures=True)

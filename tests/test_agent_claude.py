@@ -1543,3 +1543,101 @@ class TestClaudeSmartRouting:
         assert state.get(claude.SMART_ROUTING_STATE_KEY) is None
         assert list(doc["hooks"]) == ["PreToolUse"]
         assert doc["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == "user-policy"
+
+
+class TestManagedModelPicker:
+    """A managed static `names` list drives Claude Code's own picker allow-list; a discovery
+    location instead turns on gateway model discovery."""
+
+    WS = "https://ws.example.com"
+
+    def test_static_names_write_available_models_and_picker(self):
+        overlay, keys = claude.render_overlay(
+            self.WS, None, {}, static_models=["system.ai.claude-opus-4-8", "system.ai.kimi-k3"]
+        )
+        assert overlay["availableModels"] == ["system.ai.claude-opus-4-8", "system.ai.kimi-k3"]
+        assert overlay["enforceAvailableModels"] is True
+        assert overlay["modelPicker"] == {
+            "replaceBuiltInOptions": True,
+            "options": [
+                {"model": "system.ai.claude-opus-4-8", "label": "claude-opus-4-8"},
+                {"model": "system.ai.kimi-k3", "label": "kimi-k3"},
+            ],
+        }
+        for key in claude.CLAUDE_MANAGED_PICKER_KEYS:
+            assert [key] in keys
+
+    def test_model_service_location_enables_gateway_discovery(self):
+        overlay, keys = claude.render_overlay(self.WS, None, {}, model_service_location="system.ai")
+        assert overlay["env"]["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] == "1"
+        assert "availableModels" not in overlay
+        assert ["env", "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] in keys
+
+    def test_provider_suppresses_the_static_picker(self):
+        overlay, _ = claude.render_overlay(
+            self.WS, None, {}, provider="cat.sch.mps", static_models=["system.ai.claude-opus-4-8"]
+        )
+        assert "availableModels" not in overlay
+        assert "modelPicker" not in overlay
+
+    def test_stale_picker_keys_pruned_when_no_static_list(self, tmp_path, monkeypatch):
+        settings_path = tmp_path / "ucode-settings.json"
+        settings_path.write_text(
+            json.dumps({"availableModels": ["old"], "enforceAvailableModels": True})
+        )
+        monkeypatch.setattr(claude, "CLAUDE_SETTINGS_PATH", settings_path)
+        monkeypatch.setattr(claude, "CLAUDE_BACKUP_PATH", tmp_path / "backup.json")
+        monkeypatch.setattr(claude, "_reconcile_managed_settings", lambda *a, **k: None)
+        monkeypatch.setattr(claude, "save_state", lambda s: None)
+        claude.write_tool_config({"workspace": self.WS}, None)
+        doc = json.loads(settings_path.read_text())
+        assert "availableModels" not in doc
+        assert "enforceAvailableModels" not in doc
+
+    def test_static_to_dynamic_transition_prunes_ucode_owned_picker(self, tmp_path, monkeypatch):
+        settings_path = tmp_path / "ucode-settings.json"
+        monkeypatch.setattr(claude, "CLAUDE_SETTINGS_PATH", settings_path)
+        monkeypatch.setattr(claude, "CLAUDE_BACKUP_PATH", tmp_path / "backup.json")
+        monkeypatch.setattr(claude, "_reconcile_managed_settings", lambda *a, **k: None)
+        saved_state = {}
+        monkeypatch.setattr(claude, "save_state", lambda s: saved_state.update(s))
+        # Step 1: Write with static models, generating a picker and setting the marker.
+        state1 = {"workspace": self.WS, "claude_static_models": ["system.ai.claude-opus-4-8"]}
+        claude.write_tool_config(state1, None)
+        doc1 = json.loads(settings_path.read_text())
+        assert "modelPicker" in doc1
+        assert "availableModels" in doc1
+        assert claude.CLAUDE_MANAGED_MODEL_PICKER_STATE_KEY in saved_state
+        saved_picker = saved_state[claude.CLAUDE_MANAGED_MODEL_PICKER_STATE_KEY]
+        # Step 2: Transition to discovery config, reusing same on-disk settings.
+        state2 = {
+            "workspace": self.WS,
+            claude.CLAUDE_MANAGED_MODEL_PICKER_STATE_KEY: saved_picker,
+            "claude_model_service_location": "system.ai",
+        }
+        claude.write_tool_config(state2, None)
+        doc2 = json.loads(settings_path.read_text())
+        # The ucode-owned picker should be pruned; discovery flag should be set.
+        assert "modelPicker" not in doc2
+        assert "availableModels" not in doc2
+        assert "enforceAvailableModels" not in doc2
+        assert doc2.get("env", {}).get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY") == "1"
+
+    def test_admin_picker_preserved_under_dynamic_transition(self, tmp_path, monkeypatch):
+        settings_path = tmp_path / "ucode-settings.json"
+        admin_picker = {
+            "replaceBuiltInOptions": True,
+            "options": [{"model": "system.ai.claude-custom", "label": "custom"}],
+        }
+        settings_path.write_text(json.dumps({"modelPicker": admin_picker}))
+        monkeypatch.setattr(claude, "CLAUDE_SETTINGS_PATH", settings_path)
+        monkeypatch.setattr(claude, "CLAUDE_BACKUP_PATH", tmp_path / "backup.json")
+        monkeypatch.setattr(claude, "_reconcile_managed_settings", lambda *a, **k: None)
+        monkeypatch.setattr(claude, "save_state", lambda s: None)
+        # Apply discovery config without any ownership marker set.
+        state = {"workspace": self.WS, "claude_model_service_location": "system.ai"}
+        claude.write_tool_config(state, None)
+        doc = json.loads(settings_path.read_text())
+        # Admin picker should be preserved even though we're in discovery mode.
+        assert doc["modelPicker"] == admin_picker
+        assert doc.get("env", {}).get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY") == "1"

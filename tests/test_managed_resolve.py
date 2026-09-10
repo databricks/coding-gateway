@@ -14,8 +14,10 @@ from ucode.managed_resolve import (
     managed_default_model,
     managed_enabled_tools,
     managed_launch_model,
+    managed_model_service_location,
     managed_provider_service,
     managed_state_overrides,
+    managed_static_models,
     managed_supplies_models,
     managed_unservable_models,
     recommended_agent,
@@ -598,3 +600,46 @@ class TestManagedLaunchModel:
 
     def test_none_when_neither_names_a_model(self):
         assert managed_launch_model({}, None, "pi") is None
+
+
+class TestStaticAndAutoModels:
+    """The static `names` allow-list and the `model_service_location` auto-discovery source."""
+
+    @staticmethod
+    def _managed(tool, model_config):
+        return {"default_agent": tool, "enabled_agents": {tool: {"model_config": model_config}}}
+
+    def test_static_models_reads_the_names_list(self):
+        m = self._managed("claude", {"names": ["system.ai.claude-opus-4-8", "system.ai.kimi-k3"]})
+        assert managed_static_models(m, "claude") == [
+            "system.ai.claude-opus-4-8",
+            "system.ai.kimi-k3",
+        ]
+
+    def test_static_models_none_when_absent_or_empty(self):
+        assert managed_static_models(self._managed("claude", {"names": []}), "claude") is None
+        assert managed_static_models(self._managed("claude", {}), "claude") is None
+
+    def test_model_service_location_read(self):
+        m = self._managed("codex", {"model_service_location": "main.agents"})
+        assert managed_model_service_location(m, "codex") == "main.agents"
+
+    def test_names_and_location_count_as_supplying_models(self):
+        assert managed_supplies_models(self._managed("claude", {"names": ["x"]}), "claude") is True
+        assert (
+            managed_supplies_models(
+                self._managed("codex", {"model_service_location": "system.ai"}), "codex"
+            )
+            is True
+        )
+
+    def test_overrides_layer_static_and_location_for_claude_and_codex(self):
+        m = self._managed("claude", {"names": ["a", "b"]})
+        assert managed_state_overrides(m, "claude")["claude_static_models"] == ["a", "b"]
+        m2 = self._managed("codex", {"model_service_location": "main.agents"})
+        assert managed_state_overrides(m2, "codex")["codex_model_service_location"] == "main.agents"
+
+    def test_resolve_state_layers_static_models_into_state(self):
+        m = self._managed("claude", {"names": ["system.ai.claude-opus-4-8"]})
+        resolved = resolve_state(m, {"workspace": WORKSPACE}, "claude")
+        assert resolved["claude_static_models"] == ["system.ai.claude-opus-4-8"]

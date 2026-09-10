@@ -17,7 +17,9 @@ from ucode.config_io import (
     ToolSpec,
     backup_existing_file,
     deep_merge_dict,
+    is_dry_run,
     read_toml_safe,
+    write_json_file,
     write_toml_file,
 )
 from ucode.custom_oauth import CustomOAuthConfig, build_custom_auth_token_argv
@@ -56,6 +58,7 @@ CODEX_CONFIG_DIR = Path.home() / ".codex"
 CODEX_PROFILE_NAME = "ucode"
 CODEX_CONFIG_PATH = CODEX_CONFIG_DIR / f"{CODEX_PROFILE_NAME}.config.toml"
 CODEX_BACKUP_PATH = APP_DIR / "codex-ucode-config.backup.toml"
+CODEX_CATALOG_PATH = CODEX_CONFIG_DIR / "ucode-models.json"
 LEGACY_CODEX_CONFIG_PATH = CODEX_CONFIG_DIR / "config.toml"
 LEGACY_CODEX_BACKUP_PATH = APP_DIR / "codex-config.backup.toml"
 CODEX_MODEL_PROVIDER_NAME = "ucode-databricks"
@@ -78,9 +81,67 @@ SPEC: ToolSpec = {
 MANAGED_KEYS: list[list[str]] = [
     ["model_provider"],
     ["model"],
+    ["model_catalog_json"],
     ["model_providers", CODEX_MODEL_PROVIDER_NAME],
     ["model_providers", CODEX_MODEL_PROVIDER_NAME, "http_headers"],
 ]
+
+_CODEX_PRESET_DEFAULTS: dict = {
+    "default_reasoning_level": "medium",
+    "supported_reasoning_levels": [
+        {"effort": "low", "description": "Fast responses with lighter reasoning"},
+        {
+            "effort": "medium",
+            "description": "Balances speed and reasoning depth for everyday tasks",
+        },
+        {"effort": "high", "description": "Greater reasoning depth for complex problems"},
+    ],
+    "shell_type": "shell_command",
+    "visibility": "list",
+    "supported_in_api": True,
+    "additional_speed_tiers": [],
+    "service_tiers": [],
+    "availability_nux": None,
+    "upgrade": None,
+    "base_instructions": "You are a coding agent accessed through the Databricks AI Gateway.",
+    "include_skills_usage_instructions": False,
+    "default_reasoning_summary": "auto",
+    "support_verbosity": True,
+    "default_verbosity": None,
+    "apply_patch_tool_type": None,
+    "web_search_tool_type": "text",
+    "truncation_policy": {"mode": "tokens", "limit": 10000},
+    "supports_parallel_tool_calls": True,
+    "supports_image_detail_original": False,
+    "effective_context_window_percent": 95,
+    "experimental_supported_tools": [],
+    "input_modalities": ["text"],
+    "supports_search_tool": False,
+    "use_responses_lite": True,
+}
+
+
+def build_codex_catalog(models: list[str]) -> dict:
+    """Build the ``model_catalog_json`` payload for a static model allow-list.
+
+    Setting ``model_catalog_json`` makes Codex's StaticModelsManager the model source in place of
+    remote discovery, so ``/model`` lists exactly these entries. Each is a full ModelPreset; the
+    admin's list order is preserved via descending ``priority``.
+    """
+    total = len(models)
+    return {
+        "models": [
+            {
+                "slug": model_id,
+                "display_name": model_id.removeprefix("system.ai."),
+                "description": "Databricks-hosted model via AI Gateway.",
+                "priority": total - index,
+                **_CODEX_PRESET_DEFAULTS,
+            }
+            for index, model_id in enumerate(models)
+        ]
+    }
+
 
 LEGACY_MANAGED_KEYS: list[list[str]] = [
     ["profile"],
@@ -184,10 +245,13 @@ def render_overlay(
     use_pat: bool = False,
     provider: str | None = None,
     custom_oauth: CustomOAuthConfig | None = None,
+    catalog_path: str | None = None,
 ) -> dict:
     overlay: dict = {"model_provider": CODEX_MODEL_PROVIDER_NAME}
     if model:
         overlay["model"] = model
+    if catalog_path:
+        overlay["model_catalog_json"] = catalog_path
     overlay["model_providers"] = {
         CODEX_MODEL_PROVIDER_NAME: _provider_block(
             workspace, databricks_profile, use_pat, provider, custom_oauth
@@ -350,6 +414,10 @@ def write_tool_config(state: dict, model: str | None = None, provider: str | Non
         save_state(state)
         return state
 
+    static_models = state.get("codex_static_models")
+    static_models = static_models if isinstance(static_models, list) and static_models else None
+    catalog_path = str(CODEX_CATALOG_PATH) if static_models and not provider else None
+
     _remove_legacy_ucode_profile()
     backup_existing_file(CODEX_CONFIG_PATH, CODEX_BACKUP_PATH)
     overlay = render_overlay(
@@ -359,6 +427,7 @@ def write_tool_config(state: dict, model: str | None = None, provider: str | Non
         use_pat=bool(state.get("use_pat")),
         provider=provider,
         custom_oauth=state.get("custom_oauth"),
+        catalog_path=catalog_path,
     )
 
     def compose(base: dict) -> dict:
@@ -367,7 +436,14 @@ def write_tool_config(state: dict, model: str | None = None, provider: str | Non
         if chosen_model is None:
             for key in ("model", "model_reasoning_effort"):
                 base.pop(key, None)
+        if not catalog_path:
+            base.pop("model_catalog_json", None)
         return base
+
+    if static_models and not provider:
+        write_json_file(CODEX_CATALOG_PATH, build_codex_catalog(static_models))
+    elif CODEX_CATALOG_PATH.exists() and not is_dry_run():
+        CODEX_CATALOG_PATH.unlink()
 
     doc = read_toml_safe(CODEX_CONFIG_PATH)
     compose(doc)

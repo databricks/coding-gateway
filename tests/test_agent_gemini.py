@@ -59,6 +59,18 @@ class TestRenderEnvOverlay:
         env = gemini.render_env_overlay(WS, "gemini-2", "tok")
         assert env["GEMINI_CLI_CUSTOM_HEADERS"] == "User-Agent:ucode/0.1.0 gemini/0.40.0"
 
+    def test_provider_adds_routing_header_and_pins_target(self, monkeypatch):
+        monkeypatch.setattr(gemini, "ucode_version", lambda: "0.1.0")
+        monkeypatch.setattr(gemini, "agent_version", lambda binary: "0.40.0")
+        env = gemini.render_env_overlay(
+            WS, "gemini-3.5-flash", "tok", provider="cat.sch.gemini-enterprise"
+        )
+        assert env["GEMINI_MODEL"] == "gemini-3.5-flash"
+        assert env["GEMINI_CLI_CUSTOM_HEADERS"] == (
+            "User-Agent:ucode/0.1.0 gemini/0.40.0,"
+            "Databricks-Model-Provider-Service:cat.sch.gemini-enterprise"
+        )
+
 
 class TestBuildRuntimeEnv:
     def test_merges_os_environment(self):
@@ -155,23 +167,6 @@ class TestGeminiVersionGating:
         monkeypatch.setattr(gemini, "agent_version", lambda binary: "0.45.0")
         monkeypatch.setattr(gemini, "latest_version_below", lambda pkg, ceiling: None)
         assert gemini.too_new_downgrade() is None
-
-    def test_update_only_offered_toward_working_version(self, monkeypatch):
-        # Installed 0.40.0, latest working 0.44.1 -> offer the upgrade.
-        monkeypatch.setattr(gemini, "agent_version", lambda binary: "0.40.0")
-        monkeypatch.setattr(gemini, "latest_version_below", lambda pkg, ceiling: "0.44.1")
-        assert gemini.is_update_available() == ("0.40.0", "0.44.1")
-
-    def test_no_update_when_already_at_working_version(self, monkeypatch):
-        monkeypatch.setattr(gemini, "agent_version", lambda binary: "0.44.1")
-        monkeypatch.setattr(gemini, "latest_version_below", lambda pkg, ceiling: "0.44.1")
-        assert gemini.is_update_available() is None
-
-    def test_no_update_offered_toward_broken_version(self, monkeypatch):
-        # Even when a newer 0.45 exists, the target stays below the ceiling.
-        monkeypatch.setattr(gemini, "agent_version", lambda binary: "0.44.1")
-        monkeypatch.setattr(gemini, "latest_version_below", lambda pkg, ceiling: "0.44.1")
-        assert gemini.is_update_available() is None
 
 
 class TestGeminiValidateCmd:

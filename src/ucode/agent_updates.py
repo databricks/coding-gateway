@@ -71,6 +71,8 @@ def latest_version_below(package: str, ceiling: tuple[int, int, int]) -> str | N
 
 
 def available_npm_package_update(package: str) -> tuple[str, str] | None:
+    """Return ``(current, latest)`` when a globally installed npm package has a
+    newer release published, else None. Read-only — for ``ucode doctor``."""
     if not shutil.which("npm"):
         return None
     try:

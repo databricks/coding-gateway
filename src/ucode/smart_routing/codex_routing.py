@@ -1,31 +1,29 @@
 """Databricks AI Gateway routing helpers for Codex sessions and subagents.
 
 Codex-specific configuration on top of the shared :mod:`ucode.smart_routing.routing`
-core: the frozen ``task_v1`` Codex route arms, the ``spawn_agent`` tool detector,
-the Codex model-id translation, and the artifact paths.
+core: the workspace-backed route options, the ``spawn_agent`` tool
+detector, the Codex model-id translation, and the artifact paths.
 """
 
 from __future__ import annotations
 
+import json
 import re
 
 # Re-exported so tests can patch the shared ``urlopen`` seam via
 # ``codex_routing.urllib.request`` — the actual call lives in ``routing``, but
 # Python modules are singletons so patching this name patches the one call site.
 import urllib.request  # noqa: F401
+from collections.abc import Callable
 from typing import Any
 
 from ucode.config_io import APP_DIR
-from ucode.databricks import get_databricks_token
 from ucode.smart_routing import routing
 from ucode.smart_routing.routing import RoutingDecision
 
 ROUTER_NAME = routing.ROUTER_NAME
 ROUTING_PATH = routing.ROUTING_PATH
 REQUEST_TIMEOUT_S = routing.REQUEST_TIMEOUT_S
-CODEX_ROUTE_ARMS = ("glm-5-2", "gpt-5-6-sol", "gpt-5-6-luna")
-GLM_ROUTE_ARM = "glm-5-2"
-GLM_GATEWAY_MODEL = "system.ai.glm-5-2"
 SPAWN_AGENT_TOOL_SUFFIX = "spawn_agent"
 CANARY_PATH = APP_DIR / "codex-smart-routing-canary.json"
 AUDIT_PATH = APP_DIR / "codex-smart-routing-audit.jsonl"
@@ -36,66 +34,6 @@ _GPT_RE = re.compile(r"gpt-(\d+)(?:[.-](\d+))?(?:[.-](\d+))?(-.+|[a-z].*)?")
 _normalize_model = routing.normalize_model
 
 
-def route_launch_model(state: dict, tool_args: list[str]):
-    """Route a root Codex launch on the launch-time prompt, if there is one.
-
-    Returns (None, None) when the launch carries no prompt (a bare interactive
-    session): with no task signal the router can only return its floor arm, so
-    routing would just add a round-trip and silently override the user's default
-    model. In that case we don't route and keep the configured default. Routing
-    on a typed-in first prompt is out of scope — no hook/MCP can retarget the
-    root model once the session is running.
-    """
-    task = _launch_routing_task(tool_args)
-    if task is None:
-        return None, None
-    workspace = state.get("workspace")
-    models = state.get("codex_models")
-    if not isinstance(workspace, str) or not isinstance(models, list):
-        return None, "workspace model metadata is unavailable"
-    try:
-        token = get_databricks_token(workspace, state.get("profile"))
-    except RuntimeError as exc:
-        return None, f"could not authenticate the routing request: {exc}"
-    return request_routing_decision(workspace, token, task, models)
-
-
-# Codex CLI options that consume a following value (from `codex --help`); their
-# values must not be mistaken for the seed prompt when parsing launch args.
-_CODEX_VALUE_OPTIONS = frozenset(
-    {
-        "-c",
-        "--config",
-        "-i",
-        "--image",
-        "-m",
-        "--model",
-        "-p",
-        "--profile",
-        "-s",
-        "--sandbox",
-        "-a",
-        "--ask-for-approval",
-        "-C",
-        "--cd",
-        "--add-dir",
-        "--enable",
-        "--disable",
-        "--local-provider",
-        "--remote",
-        "--remote-auth-token-env",
-    }
-)
-
-
-def _launch_routing_task(tool_args: list[str]) -> str | None:
-    # The routing task is the user's real first prompt when it's on the command
-    # line (`codex "<prompt>"`, `codex exec "<prompt>"`, or after `--`). A bare
-    # interactive launch has no prompt yet → None, and the caller skips routing
-    # (the root model can't be re-routed once the TUI is running).
-    return routing.extract_seed_prompt(tool_args, _CODEX_VALUE_OPTIONS)
-
-
 def request_routing_decision(
     workspace: str,
     token: str,
@@ -103,29 +41,38 @@ def request_routing_decision(
     available_models: list[str],
     *,
     timeout: float = REQUEST_TIMEOUT_S,
+    log: Callable[[str], None] | None = None,
 ) -> tuple[RoutingDecision | None, str | None]:
-    """Ask the workspace ``task_v1`` router for a servable Codex model."""
-    candidates = _routing_candidates(available_models)
-    missing = [
-        arm for arm in CODEX_ROUTE_ARMS if arm not in {_normalize_model(m) for m in candidates}
-    ]
-    if missing:
-        return None, f"required Codex routing models are unavailable: {', '.join(missing)}"
-
+    """Ask the router for a servable Codex model."""
+    available = {_normalize_model(model): model for model in available_models}
+    route_options = [(model, "codex") for model in available]
+    if not route_options:
+        return None, "no cached model services are available"
+    router_name = routing.configured_router_name()
+    if log is not None:
+        payload = {
+            "route_options": [
+                {"model": model, "harness": harness} for model, harness in route_options
+            ],
+            "task": {"prompt": task},
+            "route_selector": {"router_name": router_name},
+        }
+        url = workspace.rstrip("/") + ROUTING_PATH
+        log(f"[ROUTE] request POST {url}: {json.dumps(payload, separators=(',', ':'))}")
     return routing.select_route(
         workspace,
         token,
         task,
-        [(arm, "codex") for arm in CODEX_ROUTE_ARMS],
-        lambda raw_model: resolve_routed_model(raw_model, candidates),
+        route_options,
+        lambda raw_model: available.get(_normalize_model(raw_model)),
+        router_name=router_name,
         timeout=timeout,
     )
 
 
 def resolve_routed_model(raw_model: str, available_models: list[str]) -> str | None:
-    """Map a ``task_v1`` arm to a model the configured workspace can serve."""
-    candidates = _routing_candidates(available_models)
-    normalized = {_normalize_model(model): model for model in candidates}
+    """Map a router arm to a model the configured workspace can serve."""
+    normalized = {_normalize_model(model): model for model in available_models}
     return normalized.get(_normalize_model(raw_model))
 
 
@@ -152,7 +99,7 @@ def route_pre_tool_use(
             workspace, token, task, available_models, timeout=timeout
         ),
         default_task_label="Codex subagent task",
-        model_id_mapper=_codex_model_id,
+        model_id_mapper=codex_model_id,
         record_decision=record,
     )
 
@@ -180,13 +127,6 @@ def clear_routing_artifacts() -> None:
     routing.clear_artifacts((CANARY_PATH, AUDIT_PATH, DECISIONS_PATH))
 
 
-def _routing_candidates(models: list[str]) -> list[str]:
-    candidates = [model for model in models if isinstance(model, str) and model]
-    if GLM_ROUTE_ARM not in {_normalize_model(model) for model in candidates}:
-        candidates.append(GLM_GATEWAY_MODEL)
-    return candidates
-
-
 def _parse_gpt(model: str) -> tuple[int, int, int, str] | None:
     match = _GPT_RE.fullmatch(_normalize_model(model))
     if not match:
@@ -203,12 +143,16 @@ def _model_strength(model: str) -> tuple[int, int, int, int]:
     return major, minor, patch, 1 if not suffix else 0
 
 
-def _codex_model_id(model: str) -> str:
+def codex_model_id(model: str) -> str:
+    """Map a UC GPT service ID to Codex's bundled catalog slug.
+
+    Codex's bundled GPT catalog owns the model metadata for these aliases,
+    while the AI Gateway resolves them back to the matching ``system.ai`` service.
+    Leave non-GPT models unchanged because their metadata comes from the gateway catalog.
+    """
     tail = model.rsplit("/", 1)[-1]
     if tail in {"databricks-gpt-5-2-codex", "databricks-gpt-5-4-nano"}:
         return tail
-    if _normalize_model(model) == GLM_ROUTE_ARM:
-        return GLM_GATEWAY_MODEL
     if model.startswith("system.ai."):
         bare = model.removeprefix("system.ai.")
     elif tail.startswith("databricks-"):
@@ -217,7 +161,7 @@ def _codex_model_id(model: str) -> str:
         return model
     match = _GPT_RE.fullmatch(bare)
     if not match:
-        return bare
+        return model
     major, minor, patch, suffix = match.groups()
     version = major
     if minor is not None:

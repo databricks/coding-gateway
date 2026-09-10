@@ -181,7 +181,10 @@ def parse_dotenv(path: Path) -> dict[str, str]:
     """Parse a simple KEY=VALUE / KEY="VALUE" .env file, preserving insertion order.
 
     Comments and blank lines are dropped on round-trip. Lines that don't look
-    like KEY=... are skipped.
+    like KEY=... are skipped. Leading whitespace (line indentation and spacing
+    after the ``=``) is trimmed, but the exact characters up to the end of the
+    line are preserved — including any trailing spaces — so a value such as
+    ``token = abc123 `` keeps its trailing space.
     """
     if not path.exists():
         return {}
@@ -191,16 +194,20 @@ def parse_dotenv(path: Path) -> dict[str, str]:
     except OSError:
         return {}
     for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
+        # Detect blank / comment lines on the fully-stripped form so trailing
+        # spaces on value lines don't change which lines are skipped.
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
             continue
-        if "=" not in line:
+        if "=" not in stripped:
             continue
-        key, _, val = line.partition("=")
+        # Only strip *leading* whitespace from the line so the characters
+        # between "=" and end-of-line (including trailing spaces) are preserved.
+        key, _, val = raw_line.lstrip().partition("=")
         key = key.strip()
         if not key:
             continue
-        val = val.strip()
+        val = val.lstrip()
         if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
             val = val[1:-1]
         env[key] = val

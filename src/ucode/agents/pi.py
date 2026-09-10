@@ -32,7 +32,6 @@ import signal
 import subprocess
 import threading
 
-from ucode.agent_updates import available_npm_package_update
 from ucode.config_io import (
     APP_DIR,
     ToolSpec,
@@ -50,6 +49,8 @@ from ucode.databricks import (
 )
 from ucode.state import mark_tool_managed, save_state
 from ucode.telemetry import agent_version, ucode_version
+
+from .args import LaunchOptions
 
 PI_UCODE_HOME = APP_DIR / "pi-home"
 PI_CONFIG_DIR = PI_UCODE_HOME / ".pi" / "agent"
@@ -77,10 +78,6 @@ PROVIDER_KEYS: list[list[str]] = [["providers", name] for name in PROVIDER_NAMES
 # Old provider names earlier ucode versions wrote; cleaned up on each write so
 # users don't end up with stale entries pointing at routes that 400.
 LEGACY_PROVIDER_NAMES = ("databricks-anthropic", "databricks-codex", "databricks-oss")
-
-
-def is_update_available() -> tuple[str, str] | None:
-    return available_npm_package_update(SPEC["package"])
 
 
 def _resolve_model_selector(
@@ -286,7 +283,7 @@ def build_runtime_env(token: str) -> dict[str, str]:
     return env
 
 
-def launch(state: dict, tool_args: list[str]) -> None:
+def launch(state: dict, tool_args: list[str], *, options: LaunchOptions) -> None:
     token = _refresh_token_once(state)
     env = build_runtime_env(token)
 

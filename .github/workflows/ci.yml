@@ -48,13 +48,14 @@ jobs:
       # The agent launch tests `_require_binary("codex")` etc. and skip when
       # the CLI isn't on PATH. Install all six so each TestXxxLaunch test
       # actually runs instead of skipping.
+      # Pin Copilot because 1.0.81-6 sends unsupported parameters through BYOK providers.
       - name: Install agent CLIs
         run: npm install -g
           @anthropic-ai/claude-code
           @openai/codex
           @google/gemini-cli
-          opencode-ai
-          @github/copilot
+          opencode-ai@1
+          @github/copilot@1.0.80
           @earendil-works/pi-coding-agent
       - run: uv lock
       - run: uv tool install .

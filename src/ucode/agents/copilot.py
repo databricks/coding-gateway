@@ -20,7 +20,6 @@ import subprocess
 import threading
 from pathlib import Path
 
-from ucode.agent_updates import available_npm_package_update
 from ucode.config_io import (
     APP_DIR,
     ToolSpec,
@@ -36,6 +35,8 @@ from ucode.databricks import (
     get_databricks_token,
 )
 from ucode.state import mark_tool_managed, save_state
+
+from .args import LaunchOptions
 
 COPILOT_CONFIG_DIR = Path.home() / ".copilot"
 COPILOT_ENV_PATH = COPILOT_CONFIG_DIR / "ucode.env"
@@ -64,10 +65,6 @@ LEGACY_ENV_KEYS = [
     "OPENAI_API_KEY",
     "COPILOT_PROVIDER_API_KEY",
 ]
-
-
-def is_update_available() -> tuple[str, str] | None:
-    return available_npm_package_update(SPEC["package"])
 
 
 def default_model(state: dict) -> str | None:
@@ -188,7 +185,8 @@ def _refresh_forever(
             continue
 
 
-def launch(state: dict, tool_args: list[str], model_override: str | None = None) -> None:
+def launch(state: dict, tool_args: list[str], *, options: LaunchOptions) -> None:
+    model_override = options.copilot_launch_model
     model, token = _refresh_token_once(state, model_override=model_override)
     env = build_runtime_env(state["workspace"], model, token)
 

@@ -252,6 +252,7 @@ def _http_get_json(
     *,
     timeout: int = 10,
     max_retries: int = 0,
+    headers: dict[str, str] | None = None,
 ) -> tuple[dict | list | None, str | None]:
     """GET a JSON endpoint. Returns (payload, None) on success, (None, reason) on failure.
 
@@ -264,10 +265,9 @@ def _http_get_json(
     if max_retries < 0:
         raise ValueError("max_retries must be non-negative")
 
-    request = urllib_request.Request(
-        url,
-        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-    )
+    request_headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    request_headers.update(headers or {})
+    request = urllib_request.Request(url, headers=request_headers)
     for attempt in range(max_retries + 1):
         try:
             with urllib_request.urlopen(request, timeout=timeout) as response:
@@ -2963,6 +2963,22 @@ def build_tool_base_url(tool: str, workspace: str) -> str:
     if tool == "pi":
         raise RuntimeError("Pi has multiple base URLs — use build_pi_base_urls() instead.")
     raise RuntimeError(f"Unsupported tool '{tool}'.")
+
+
+def fetch_codex_mps_model_catalog(workspace: str, token: str, provider: str) -> dict:
+    payload, reason = _http_get_json(
+        f"{build_tool_base_url('codex', workspace)}/models",
+        token,
+        max_retries=2,
+        headers={"Databricks-Model-Provider-Service": provider},
+    )
+    if reason:
+        raise RuntimeError(f"Could not discover Codex models for {provider}: {reason}")
+    if not isinstance(payload, dict) or not isinstance(payload.get("models"), list):
+        raise RuntimeError(f"Provider {provider} returned an invalid Codex model catalog.")
+    if not payload["models"]:
+        raise RuntimeError(f"Provider {provider} returned no Codex models.")
+    return payload
 
 
 def build_opencode_base_urls(workspace: str) -> dict[str, str]:

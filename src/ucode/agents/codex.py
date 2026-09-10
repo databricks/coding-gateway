@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import os
 import re
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
@@ -18,12 +20,18 @@ from ucode.config_io import (
     backup_existing_file,
     deep_merge_dict,
     read_toml_safe,
+    write_json_file,
     write_toml_file,
 )
-from ucode.custom_oauth import CustomOAuthConfig, build_custom_auth_token_argv
+from ucode.custom_oauth import (
+    CustomOAuthConfig,
+    build_custom_auth_token_argv,
+    get_custom_client_token,
+)
 from ucode.databricks import (
     build_auth_token_argv,
     build_tool_base_url,
+    fetch_codex_mps_model_catalog,
     get_databricks_token,
 )
 from ucode.launcher import exec_or_spawn
@@ -46,7 +54,7 @@ from ucode.smart_routing.codex_hooks import (
     sync_smart_routing_hooks,
 )
 from ucode.smart_routing.codex_routing import codex_model_id
-from ucode.state import mark_tool_managed, save_state
+from ucode.state import get_provider_service, mark_tool_managed, save_state
 from ucode.telemetry import agent_version, ucode_version
 from ucode.ui import print_warning_err
 
@@ -56,9 +64,11 @@ CODEX_CONFIG_DIR = Path.home() / ".codex"
 CODEX_PROFILE_NAME = "ucode"
 CODEX_CONFIG_PATH = CODEX_CONFIG_DIR / f"{CODEX_PROFILE_NAME}.config.toml"
 CODEX_BACKUP_PATH = APP_DIR / "codex-ucode-config.backup.toml"
+CODEX_MPS_MODEL_CATALOG_PATH = APP_DIR / "codex-mps-model-catalog.json"
 LEGACY_CODEX_CONFIG_PATH = CODEX_CONFIG_DIR / "config.toml"
 LEGACY_CODEX_BACKUP_PATH = APP_DIR / "codex-config.backup.toml"
 CODEX_MODEL_PROVIDER_NAME = "ucode-databricks"
+MPS_HEADER = "Databricks-Model-Provider-Service"
 MINIMUM_CODEX_VERSION = (0, 134, 0)
 MINIMUM_CODEX_VERSION_TEXT = "0.134.0"
 MINIMUM_ROUTING_CODEX_VERSION = (0, 145, 0)
@@ -160,7 +170,7 @@ def _provider_block(
     # Route to an external Model Provider Service; the gateway selects the
     # provider from this header on every request.
     if provider:
-        http_headers["Databricks-Model-Provider-Service"] = provider
+        http_headers[MPS_HEADER] = provider
     return {
         "name": "Databricks AI Gateway",
         "base_url": base_url,
@@ -345,6 +355,7 @@ def write_tool_config(state: dict, model: str | None = None, provider: str | Non
         ):
             for key in ("model", "model_reasoning_effort"):
                 profiles[CODEX_PROFILE_NAME].pop(key, None)
+        _set_provider_header(doc, None)
         write_toml_file(LEGACY_CODEX_CONFIG_PATH, doc)
         state = mark_tool_managed(state, "codex", LEGACY_MANAGED_KEYS)
         save_state(state)
@@ -367,6 +378,7 @@ def write_tool_config(state: dict, model: str | None = None, provider: str | Non
         if chosen_model is None:
             for key in ("model", "model_reasoning_effort"):
                 base.pop(key, None)
+        _set_provider_header(base, None)
         return base
 
     doc = read_toml_safe(CODEX_CONFIG_PATH)
@@ -497,6 +509,81 @@ def clear_model_preferences(state: dict) -> bool:
     return changed
 
 
+def _set_provider_header(config: dict, provider: str | None) -> None:
+    model_providers = config.get("model_providers")
+    if not isinstance(model_providers, dict):
+        return
+    provider_block = model_providers.get(CODEX_MODEL_PROVIDER_NAME)
+    if not isinstance(provider_block, dict):
+        return
+    headers = provider_block.get("http_headers")
+    if not isinstance(headers, dict):
+        provider_block["http_headers"] = {}
+        headers = provider_block["http_headers"]
+    if provider:
+        headers[MPS_HEADER] = provider
+    else:
+        headers.pop(MPS_HEADER, None)
+
+
+def _model_catalog_path(workspace: str, provider: str) -> Path:
+    key = f"{workspace.rstrip('/')}\0{provider}".encode()
+    digest = hashlib.sha256(key).hexdigest()[:16]
+    base = CODEX_MPS_MODEL_CATALOG_PATH
+    return base.with_name(f"{base.stem}-{digest}{base.suffix}")
+
+
+def _write_model_catalog(path: Path, catalog: dict) -> None:
+    temp_path = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, raw_temp_path = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+        )
+        os.close(fd)
+        temp_path = Path(raw_temp_path)
+        write_json_file(temp_path, catalog)
+        os.replace(temp_path, path)
+    except OSError as exc:
+        raise RuntimeError(f"Could not write Codex model catalog at {path}.") from exc
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _launch_token(state: dict, workspace: str) -> str:
+    custom_oauth = state.get("custom_oauth")
+    if isinstance(custom_oauth, dict):
+        return get_custom_client_token(
+            workspace,
+            custom_oauth["client_id"],
+            custom_oauth["redirect_url"],
+            scopes=custom_oauth["scopes"],
+        )
+    return get_databricks_token(workspace, state.get("profile"))
+
+
+def _reject_managed_mps_catalog() -> None:
+    path = _managed_config_path()
+    if path is None:
+        return
+    text = read_managed_file(path)
+    if text is None:
+        return
+    try:
+        managed = _parse_managed_config(text)
+    except RuntimeError as exc:
+        raise RuntimeError(f"Cannot read Codex managed settings at {path}: {exc}") from exc
+    if "model_catalog_json" in managed:
+        raise RuntimeError(
+            f"Codex managed settings at {path} define model_catalog_json, which overrides MPS "
+            "discovery. Remove it or contact your administrator."
+        )
+
+
 def launch(
     state: dict,
     tool_args: list[str],
@@ -509,8 +596,18 @@ def launch(
     clear_model_preferences(state)
     binary = SPEC["binary"]
     workspace = state.get("workspace")
+    launch_provider = state.get("_codex_launch_provider")
+    provider = (
+        launch_provider.strip()
+        if isinstance(launch_provider, str) and launch_provider.strip()
+        else get_provider_service(state, "codex")
+    )
+    if workspace and provider:
+        _reject_managed_mps_catalog()
+    token = None
     if workspace:
-        os.environ["OAUTH_TOKEN"] = get_databricks_token(workspace, state.get("profile"))
+        token = _launch_token(state, workspace)
+        os.environ["OAUTH_TOKEN"] = token
     # Layer ucode's named profile as ordinary config overrides. Unlike
     # `--profile`, `--config` is accepted by runtime, utility, and server
     # commands, so every invocation keeps the same Databricks settings without
@@ -521,6 +618,12 @@ def launch(
             f"Cannot launch Codex with the ucode profile because {CODEX_CONFIG_PATH} "
             "is missing or empty. Run `ucode configure --agents codex` first."
         )
+    _set_provider_header(profile_doc, provider)
+    if workspace and token and provider:
+        catalog = fetch_codex_mps_model_catalog(workspace, token, provider)
+        catalog_path = _model_catalog_path(workspace, provider)
+        _write_model_catalog(catalog_path, catalog)
+        profile_doc["model_catalog_json"] = str(catalog_path)
     exec_or_spawn([binary, *codex_config_args(profile_doc), *tool_args])
 
 

@@ -985,6 +985,23 @@ class TestClaudeModelFlag:
         assert result.exit_code == 0, result.output
         assert mock_launch.call_args.args[1]["_claude_launch_provider"] == "main.default.anthropic"
 
+    def test_provider_sets_transient_codex_launch_marker(self):
+        state = dict(MINIMAL_STATE)
+        with (
+            patch("ucode.cli.ensure_bootstrap_dependencies"),
+            patch("ucode.cli.load_state", return_value=state),
+            patch("ucode.cli.ensure_provider_state", return_value=state),
+            patch("ucode.cli.configure_shared_state", return_value=state),
+            patch("ucode.cli.resolve_provider_models", return_value=(None, None, False)),
+            patch("ucode.cli.configure_tool", return_value=state),
+            patch("ucode.cli._fetch_managed_config", return_value=(None, False)),
+            patch("ucode.cli.launch_agent") as mock_launch,
+        ):
+            result = runner.invoke(app, ["codex", "--provider", "main.default.openai"])
+
+        assert result.exit_code == 0, result.output
+        assert mock_launch.call_args.args[1]["_codex_launch_provider"] == "main.default.openai"
+
 
 class TestGeminiProviderLaunch:
     @staticmethod

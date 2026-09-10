@@ -23,6 +23,7 @@ from urllib import request as urllib_request
 import httpx
 import pytest
 
+from ucode.agents import resolve_provider_models
 from ucode.databricks import (
     build_shared_base_urls,
     build_tool_base_url,
@@ -35,6 +36,7 @@ from ucode.databricks import (
     list_model_provider_services,
     list_tool_provider_services,
     probe_unity_gateway_capabilities,
+    resolve_provider_launch_model,
     service_usable_for_tool,
     workspace_hostname,
 )
@@ -51,6 +53,10 @@ CI_ANTHROPIC_MPS = "main.ucode.ci_e2e_anthropic_nonrelay_mps"  # api-key Anthrop
 CI_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 CI_OPENAI_MPS = "main.ucode.ci_openai_mps"  # api-key OpenAI (for codex)
 CI_OPENAI_MODEL = "gpt-5-nano"
+
+# Claude Code's client-side model pre-flight is flaky for MPS-routed ids and emits this; the
+# launch retries on it before giving up (see TestModelProviderLaunch).
+_CLAUDE_PREFLIGHT_FLAKE = "may not exist or you may not have access"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -575,18 +581,16 @@ class TestModelProviderLaunch:
             pytest.skip(f"no permission on provider {provider}: {combined[:200]}")
         if "Credit balance is too low" in combined:
             pytest.skip(f"provider {provider} account is out of credits: {combined[:200]}")
-        # Claude Code validates the pinned model against its discovered catalog before sending, and
-        # that pre-flight is flaky for MPS-routed ids — a transient "may not exist" here isn't the
-        # MPS failing (the direct-inference test proves routing), so skip rather than fail CI.
-        if "may not exist or you may not have access" in combined:
+        # The launch helper retries the flaky model pre-flight; a "may not exist" that survives the
+        # retries still isn't the MPS failing (the direct-inference test proves routing), so skip
+        # rather than fail CI.
+        if _CLAUDE_PREFLIGHT_FLAKE in combined:
             pytest.skip(
                 f"Claude Code model pre-flight validation flaked for {provider}: {combined[:200]}"
             )
 
     def _resolve_anthropic_mps(self, e2e_state, e2e_workspace):
         """Return (state, provider_models) for the pinned Anthropic MPS, or skip if it's absent."""
-        from ucode.agents import resolve_provider_models
-
         state = {**e2e_state, "workspace": e2e_workspace}
         provider_models, error, _relayed = resolve_provider_models(
             "claude", state, CI_ANTHROPIC_MPS
@@ -629,8 +633,13 @@ class TestModelProviderLaunch:
             "ANTHROPIC_BASE_URL": build_tool_base_url("claude", workspace),
             "ANTHROPIC_API_KEY": token,
         }
-        result = _run_agent(claude.validate_cmd("claude"), env=env, timeout=90)
-        combined = (result.stdout + result.stderr).strip()
+        # Retry the flaky client-side model pre-flight before giving up; only a persistent failure
+        # falls through to _skip_if_provider_unusable.
+        for _attempt in range(3):
+            result = _run_agent(claude.validate_cmd("claude"), env=env, timeout=90)
+            combined = (result.stdout + result.stderr).strip()
+            if _CLAUDE_PREFLIGHT_FLAKE not in combined:
+                break
         self._skip_if_provider_unusable(combined, CI_ANTHROPIC_MPS)
         assert result.returncode == 0 and combined, (
             f"model={route_root_model} rc={result.returncode} "
@@ -642,8 +651,6 @@ class TestModelProviderLaunch:
     ):
         # No --model: ucode picks the only servable tier. The MPS declares no opus, so the default
         # resolves to Haiku — and the launch succeeds only because Haiku is what the MPS allows.
-        from ucode.databricks import resolve_provider_launch_model
-
         _require_binary("claude")
         state, provider_models = self._resolve_anthropic_mps(e2e_state, e2e_workspace)
         launch_model = resolve_provider_launch_model(None, provider_models or {})
@@ -659,8 +666,6 @@ class TestModelProviderLaunch:
     ):
         # `--model haiku`: the family alias resolves to the one declared Haiku target, so the launch
         # routes. (Claude Code's bare `haiku`/undated id would 403 — the gateway exact-matches.)
-        from ucode.databricks import resolve_provider_launch_model
-
         _require_binary("claude")
         state, provider_models = self._resolve_anthropic_mps(e2e_state, e2e_workspace)
         launch_model = resolve_provider_launch_model("haiku", provider_models or {})
@@ -675,7 +680,7 @@ class TestModelProviderLaunch:
         self, tmp_path, monkeypatch, e2e_state, e2e_workspace, e2e_token
     ):
         import ucode.config_io as config_io_mod
-        from ucode.agents import codex, resolve_provider_models
+        from ucode.agents import codex
 
         _require_binary("codex")
         # Pinned to the fixed CI OpenAI MPS (Nano-only) — the codex counterpart to the claude pin

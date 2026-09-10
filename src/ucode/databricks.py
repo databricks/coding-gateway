@@ -1,5 +1,5 @@
 """Databricks workspace integration: CLI auth, token retrieval, model
-discovery, AI Gateway checks, SQL warehouse discovery, URL builders."""
+discovery, AI Gateway checks, and URL builders."""
 
 from __future__ import annotations
 
@@ -31,8 +31,6 @@ from typing import Literal, NamedTuple, NoReturn, cast, overload
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 from urllib.parse import quote, urlencode, urlparse
-
-from databricks.sql.exc import ServerOperationError
 
 from ucode.config_io import APP_DIR
 from ucode.ui import (
@@ -1310,136 +1308,6 @@ def get_databricks_token(
     return token
 
 
-def _extract_connection_page(payload: object) -> tuple[list[dict], str | None]:
-    if isinstance(payload, list):
-        return [item for item in payload if isinstance(item, dict)], None
-    if not isinstance(payload, dict):
-        raise RuntimeError("Databricks connections listing returned invalid JSON.")
-
-    payload_dict = cast(dict[str, object], payload)
-    raw_connections = payload_dict.get("connections") or []
-    if not isinstance(raw_connections, list):
-        raise RuntimeError("Databricks connections listing returned invalid JSON.")
-
-    next_page_token = payload_dict.get("next_page_token")
-    if next_page_token is not None and not isinstance(next_page_token, str):
-        raise RuntimeError("Databricks connections listing returned invalid JSON.")
-
-    return [item for item in raw_connections if isinstance(item, dict)], next_page_token
-
-
-def list_databricks_connections(workspace: str, profile: str | None = None) -> list[dict]:
-    env = build_databricks_cli_env(workspace)
-    connections: list[dict] = []
-    page_token: str | None = None
-    seen_page_tokens: set[str] = set()
-
-    try:
-        while True:
-            cmd = [
-                "databricks",
-                "connections",
-                "list",
-                *_profile_args(profile),
-                "--max-results",
-                "0",
-                "--output",
-                "json",
-            ]
-            if page_token:
-                cmd.extend(["--page-token", page_token])
-
-            result = run(
-                cmd,
-                capture_output=True,
-                text=True,
-                env=env,
-                timeout=30,
-            )
-            payload = json.loads(result.stdout or "{}")
-            page_connections, page_token = _extract_connection_page(payload)
-            connections.extend(page_connections)
-
-            if not page_token:
-                return connections
-            if page_token in seen_page_tokens:
-                raise RuntimeError("Databricks connections listing returned a repeated page token.")
-            seen_page_tokens.add(page_token)
-    except subprocess.CalledProcessError as exc:
-        raise RuntimeError(
-            "Failed to list Databricks connections via `databricks connections list`."
-        ) from exc
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError("Timed out while listing Databricks connections.") from exc
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("Databricks connections listing returned invalid JSON.") from exc
-
-
-def _extract_genie_spaces_page(payload: object) -> tuple[list[dict], str | None]:
-    if not isinstance(payload, dict):
-        raise RuntimeError("Databricks Genie spaces listing returned invalid JSON.")
-
-    payload_dict = cast(dict[str, object], payload)
-    raw_spaces = payload_dict.get("spaces") or []
-    if not isinstance(raw_spaces, list):
-        raise RuntimeError("Databricks Genie spaces listing returned invalid JSON.")
-
-    next_page_token = payload_dict.get("next_page_token")
-    if next_page_token is not None and not isinstance(next_page_token, str):
-        raise RuntimeError("Databricks Genie spaces listing returned invalid JSON.")
-
-    return [item for item in raw_spaces if isinstance(item, dict)], next_page_token
-
-
-def list_genie_spaces(workspace: str, profile: str | None = None) -> list[dict]:
-    env = build_databricks_cli_env(workspace)
-    spaces: list[dict] = []
-    page_token: str | None = None
-    seen_page_tokens: set[str] = set()
-
-    try:
-        while True:
-            cmd = [
-                "databricks",
-                "genie",
-                "list-spaces",
-                *_profile_args(profile),
-                "--page-size",
-                "100",
-                "--output",
-                "json",
-            ]
-            if page_token:
-                cmd.extend(["--page-token", page_token])
-
-            result = run(
-                cmd,
-                capture_output=True,
-                text=True,
-                env=env,
-                timeout=30,
-            )
-            payload = json.loads(result.stdout or "{}")
-            page_spaces, page_token = _extract_genie_spaces_page(payload)
-            spaces.extend(page_spaces)
-
-            if not page_token:
-                return spaces
-            if page_token in seen_page_tokens:
-                raise RuntimeError(
-                    "Databricks Genie spaces listing returned a repeated page token."
-                )
-            seen_page_tokens.add(page_token)
-    except subprocess.CalledProcessError as exc:
-        raise RuntimeError(
-            "Failed to list Databricks Genie spaces via `databricks genie list-spaces`."
-        ) from exc
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError("Timed out while listing Databricks Genie spaces.") from exc
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("Databricks Genie spaces listing returned invalid JSON.") from exc
-
-
 def _extract_apps_payload(payload: object) -> list[dict]:
     if isinstance(payload, list):
         return [item for item in payload if isinstance(item, dict)]
@@ -1449,6 +1317,34 @@ def _extract_apps_payload(payload: object) -> list[dict]:
         if isinstance(raw_apps, list):
             return [item for item in raw_apps if isinstance(item, dict)]
     raise RuntimeError("Databricks apps listing returned invalid JSON.")
+
+
+class PermissionDeniedError(RuntimeError):
+    """A workspace API returned an authorization failure (HTTP 403 / permission denied).
+
+    Callers use this only to skip V2 MCP discovery gracefully instead of aborting setup (see the
+    discovery wrappers in :mod:`ucode.mcp`), while other errors still surface.
+
+    It deliberately does NOT try to distinguish a consumer-only identity (no `workspace-access`
+    entitlement) from a workspace user missing a grant on a specific resource: no service exposes
+    a signal that reliably tells them apart. The `workspace-access` entitlement is enforced with a
+    named 403 only on guarded AI Gateway / Model Serving *inference* and model-listing paths (which
+    ucode already exercises at model setup, so a consumer is gated there) — NOT on the Apps / UC /
+    Vector Search listing calls the MCP flow uses, which return an empty list or a generic ACL
+    denial for a consumer."""
+
+
+def _looks_like_cli_permission_error(stderr: str | None) -> bool:
+    """Whether a Databricks CLI stderr indicates an authorization failure.
+
+    The CLI exit code is generic, so we match on the stable markers the CLI/API emit
+    for a denied workspace call rather than the status alone."""
+    if not stderr:
+        return False
+    lowered = stderr.lower()
+    if "permission" in lowered and ("denied" in lowered or "insufficient" in lowered):
+        return True
+    return "403" in lowered or "not authorized" in lowered or "unauthorized" in lowered
 
 
 def list_databricks_apps(workspace: str, profile: str | None = None) -> list[dict]:
@@ -1472,6 +1368,11 @@ def list_databricks_apps(workspace: str, profile: str | None = None) -> list[dic
         )
         return _extract_apps_payload(json.loads(result.stdout or "[]"))
     except subprocess.CalledProcessError as exc:
+        # A 403 here means the caller isn't authorized to list apps (a consumer-only identity, or
+        # a workspace user without apps permission); raise PermissionDeniedError so callers can skip
+        # discovery gracefully (AIGTWY-4471). Other CLI failures stay hard errors.
+        if _looks_like_cli_permission_error(exc.stderr):
+            raise PermissionDeniedError("Not authorized to list Databricks apps.") from exc
         raise RuntimeError("Failed to list Databricks apps via `databricks apps list`.") from exc
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("Timed out while listing Databricks apps.") from exc
@@ -2542,17 +2443,10 @@ def resolve_provider_launch_model(model: str | None, provider_models: dict[str, 
     )
 
 
-# `list_vector_search_catalog_schemas` walks Vector Search endpoints+indexes.
-# `list_uc_functions_catalog_schemas` walks UC catalogs+schemas in parallel and
-# keeps only schemas with at least one user function.
-
 _UC_LIST_PAGE_SIZE = 200
 _UC_LIST_MAX_PAGES = 50
 _UC_FUNCTION_PROBE_WORKERS = 16
 _UC_LIST_HTTP_TIMEOUT = 10
-_UC_FUNCTION_PROBE_TIMEOUT = 5
-_VECTOR_SEARCH_DEADLINE_SECONDS = 15.0
-_UC_FUNCTIONS_DEADLINE_SECONDS = 20.0
 # Most MCP services live outside `system.ai`, so this workspace-wide walk needs
 # enough time to enumerate them; a slow workspace still degrades to partial
 # results once the budget is exceeded instead of hanging indefinitely.
@@ -2625,208 +2519,13 @@ def _paginated_json_items(
     return items, last_reason
 
 
-def _vector_index_catalog_schema(index: dict) -> tuple[str, str] | None:
-    """Pull (catalog, schema) from one vector-search index entry."""
-    catalog = index.get("catalog_name")
-    schema = index.get("schema_name")
-    if isinstance(catalog, str) and isinstance(schema, str) and catalog and schema:
-        return catalog, schema
-    # Fallback: `name` is the fully-qualified UC name `catalog.schema.index`.
-    name = index.get("name")
-    if isinstance(name, str):
-        parts = name.split(".")
-        if len(parts) >= 3 and parts[0] and parts[1]:
-            return parts[0], parts[1]
-    return None
-
-
-def list_vector_search_catalog_schemas(
-    workspace: str,
-    token: str,
-    *,
-    deadline_seconds: float = _VECTOR_SEARCH_DEADLINE_SECONDS,
-    on_progress: Callable[[int, int, int], None] | None = None,
-) -> tuple[list[tuple[str, str]], str | None]:
-    """Return sorted unique `(catalog, schema)` pairs that contain at least
-    one Databricks Vector Search index. Walks the per-endpoint index listings
-    in parallel under a wall-clock budget; returns partial results once
-    `deadline_seconds` is exceeded.
-
-    `on_progress`, if given, is called as each endpoint's listing completes with
-    `(endpoints_done, endpoints_total, pairs_found)` for live count reporting.
-    It is invoked serially from the draining thread (not the workers)."""
-    hostname = workspace_hostname(workspace)
-    deadline = time.monotonic() + deadline_seconds
-    endpoints, reason = _paginated_json_items(
-        f"https://{hostname}/api/2.0/vector-search/endpoints",
-        token,
-        items_key="endpoints",
-        timeout=_UC_LIST_HTTP_TIMEOUT,
-    )
-    if not endpoints:
-        return [], reason or "no vector search endpoints found"
-
-    endpoint_names = [e["name"] for e in endpoints if isinstance(e.get("name"), str) and e["name"]]
-    if not endpoint_names:
-        return [], "no vector search endpoints with names"
-
-    pairs: set[tuple[str, str]] = set()
-    endpoints_total = len(endpoint_names)
-    endpoints_done = 0
-    workers = max(1, min(_UC_FUNCTION_PROBE_WORKERS, endpoints_total))
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {
-            pool.submit(
-                _paginated_json_items,
-                f"https://{hostname}/api/2.0/vector-search/indexes",
-                token,
-                items_key="vector_indexes",
-                extra_params={"endpoint_name": name},
-                timeout=_UC_LIST_HTTP_TIMEOUT,
-            ): name
-            for name in endpoint_names
-        }
-
-        def collect(result, _endpoint):
-            nonlocal endpoints_done
-            indexes, _ = result
-            for index in indexes:
-                pair = _vector_index_catalog_schema(index)
-                if pair:
-                    pairs.add(pair)
-            endpoints_done += 1
-            if on_progress is not None:
-                on_progress(endpoints_done, endpoints_total, len(pairs))
-
-        _drain_with_deadline(futures, deadline, collect)
-        pool.shutdown(wait=False, cancel_futures=True)
-
-    if not pairs:
-        return [], "no vector search indexes found"
-    return sorted(pairs), None
-
-
-def _schema_has_user_function(hostname: str, token: str, catalog: str, schema: str) -> bool:
-    """One-shot probe: does `{catalog}.{schema}` expose any UC function?"""
-    url = (
-        f"https://{hostname}/api/2.1/unity-catalog/functions"
-        f"?{urlencode({'catalog_name': catalog, 'schema_name': schema, 'max_results': '1'})}"
-    )
-    payload, _reason = _http_get_json(url, token, timeout=_UC_FUNCTION_PROBE_TIMEOUT)
-    if not isinstance(payload, dict):
-        return False
-    functions = payload.get("functions") or []
-    return isinstance(functions, list) and any(isinstance(item, dict) for item in functions)
-
-
-def list_uc_functions_catalog_schemas(
-    workspace: str,
-    token: str,
-    *,
-    deadline_seconds: float = _UC_FUNCTIONS_DEADLINE_SECONDS,
-    on_progress: Callable[[int, int, int], None] | None = None,
-) -> tuple[list[tuple[str, str]], str | None]:
-    """Return sorted unique `(catalog, schema)` pairs containing at least one
-    user-defined UC function.
-
-    `on_progress`, if given, is called during the function-probe phase with
-    `(schemas_done, schemas_total, pairs_found)` for live count reporting. It is
-    invoked serially from the draining thread (not the workers)."""
-    hostname = workspace_hostname(workspace)
-    deadline = time.monotonic() + deadline_seconds
-
-    catalogs, catalogs_reason = _paginated_json_items(
-        f"https://{hostname}/api/2.1/unity-catalog/catalogs",
-        token,
-        items_key="catalogs",
-        timeout=_UC_LIST_HTTP_TIMEOUT,
-    )
-    if not catalogs:
-        return [], catalogs_reason or "no UC catalogs found"
-
-    catalog_names = [
-        c["name"]
-        for c in catalogs
-        if isinstance(c.get("name"), str)
-        and c["name"]
-        and c["name"] not in _UC_FUNCTIONS_SKIP_CATALOGS
-    ]
-    if not catalog_names:
-        return [], "no user UC catalogs found"
-    if time.monotonic() > deadline:
-        return [], "deadline exceeded while listing UC catalogs"
-
-    # Parallel per-catalog schema listing.
-    candidate_pairs: list[tuple[str, str]] = []
-    schema_workers = max(1, min(_UC_FUNCTION_PROBE_WORKERS, len(catalog_names)))
-    with ThreadPoolExecutor(max_workers=schema_workers) as pool:
-        schema_futures = {
-            pool.submit(
-                _paginated_json_items,
-                f"https://{hostname}/api/2.1/unity-catalog/schemas",
-                token,
-                items_key="schemas",
-                extra_params={"catalog_name": cat},
-                timeout=_UC_LIST_HTTP_TIMEOUT,
-            ): cat
-            for cat in catalog_names
-        }
-
-        def collect_schemas(result, catalog):
-            schemas, _ = result
-            for schema in schemas:
-                schema_name = schema.get("name")
-                # `information_schema` is auto-attached to every catalog and
-                # never holds user functions.
-                if (
-                    isinstance(schema_name, str)
-                    and schema_name
-                    and schema_name != "information_schema"
-                ):
-                    candidate_pairs.append((catalog, schema_name))
-
-        _drain_with_deadline(schema_futures, deadline, collect_schemas)
-        pool.shutdown(wait=False, cancel_futures=True)
-
-    if not candidate_pairs:
-        if time.monotonic() > deadline:
-            return [], "deadline exceeded while listing UC schemas"
-        return [], "no UC schemas found"
-
-    # Parallel function-existence probes.
-    pairs: set[tuple[str, str]] = set()
-    schemas_total = len(candidate_pairs)
-    schemas_done = 0
-    with ThreadPoolExecutor(max_workers=_UC_FUNCTION_PROBE_WORKERS) as pool:
-        probe_futures = {
-            pool.submit(_schema_has_user_function, hostname, token, cat, schema): (cat, schema)
-            for cat, schema in candidate_pairs
-        }
-
-        def collect_pair(has_fn, pair):
-            nonlocal schemas_done
-            if has_fn:
-                pairs.add(pair)
-            schemas_done += 1
-            if on_progress is not None:
-                on_progress(schemas_done, schemas_total, len(pairs))
-
-        _drain_with_deadline(probe_futures, deadline, collect_pair)
-        pool.shutdown(wait=False, cancel_futures=True)
-
-    if not pairs:
-        if time.monotonic() > deadline:
-            return [], "deadline exceeded probing UC schemas for functions"
-        return [], "no UC schemas with user functions found"
-    return sorted(pairs), None
-
-
 def list_all_mcp_services(
     workspace: str,
     token: str,
     *,
     deadline_seconds: float = _MCP_SERVICES_WALK_DEADLINE_SECONDS,
     on_progress: Callable[[int, int, int], None] | None = None,
+    on_services: Callable[[list[str]], None] | None = None,
 ) -> tuple[list[str], str | None]:
     """Return sorted unique MCP-service full names across every `<catalog>.<schema>`
     in the workspace. The mcp-services API is one-schema-per-call, so this walks
@@ -2835,7 +2534,10 @@ def list_all_mcp_services(
 
     `on_progress`, if given, is called as each schema's listing completes with
     `(schemas_done, schemas_total, services_found)` so callers can render a live
-    count. It is invoked serially from the draining thread (not the workers).
+    count. `on_services`, if given, is called with each schema's newly-found service
+    names (deduped against everything emitted so far) so callers can stream results
+    into a picker as the walk progresses instead of waiting for the full result. Both
+    are invoked serially from the draining thread (not the workers).
 
     This walk is the slow, workspace-wide counterpart to `list_mcp_services`
     (single schema)."""
@@ -2911,10 +2613,13 @@ def list_all_mcp_services(
         def collect_services(result, _ref):
             nonlocal schemas_done
             found, _ = result
+            new = [n for n in found if n not in names]
             names.update(found)
             schemas_done += 1
             if on_progress is not None:
                 on_progress(schemas_done, schemas_total, len(names))
+            if on_services is not None and new:
+                on_services(sorted(new))
 
         _drain_with_deadline(service_futures, deadline, collect_services)
         pool.shutdown(wait=False, cancel_futures=True)
@@ -3294,135 +2999,6 @@ def _parse_decimal(value: object) -> Decimal | None:
     if isinstance(value, int):
         return Decimal(value)
     return None
-
-
-class SqlWarehouse(NamedTuple):
-    http_path: str
-    label: str
-    state: str
-
-
-def discover_sql_warehouses(
-    workspace: str,
-    token: str,
-    *,
-    warehouse_id: str | None = None,
-) -> list[SqlWarehouse]:
-    """Candidate warehouses to run the usage query against, RUNNING ones first.
-
-    Several are returned because a warehouse can report RUNNING and still refuse
-    connections, so callers fall through to the next one. An explicit
-    `warehouse_id` skips discovery entirely.
-    """
-    if warehouse_id:
-        return [SqlWarehouse(_warehouse_http_path(warehouse_id), warehouse_id, "REQUESTED")]
-
-    hostname = workspace_hostname(workspace)
-    request = urllib_request.Request(
-        f"https://{hostname}/api/2.0/sql/warehouses",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/json",
-        },
-    )
-
-    try:
-        with urllib_request.urlopen(request, timeout=20) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except urllib_error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
-        detail = body.strip() or f"HTTP {exc.code}"
-        raise RuntimeError(f"Failed to list SQL warehouses: {detail}") from exc
-    except urllib_error.URLError as exc:
-        raise RuntimeError(f"Could not reach workspace hostname {hostname}: {exc.reason}") from exc
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("Databricks warehouse discovery returned invalid JSON.") from exc
-
-    warehouses = payload.get("warehouses")
-    if not isinstance(warehouses, list) or not warehouses:
-        raise RuntimeError(
-            "No SQL warehouses found in this workspace. Create one or pass `--warehouse-id`."
-        )
-
-    candidates: list[SqlWarehouse] = []
-    for entry in warehouses:
-        if not isinstance(entry, dict):
-            continue
-        entry_id = entry.get("id")
-        if not isinstance(entry_id, str) or not entry_id.strip():
-            continue
-        name = entry.get("name")
-        state = entry.get("state", "UNKNOWN")
-        label = name if isinstance(name, str) and name else entry_id
-        candidates.append(SqlWarehouse(_warehouse_http_path(entry_id), label, str(state)))
-
-    if not candidates:
-        raise RuntimeError("No usable SQL warehouse was returned by Databricks.")
-    # Stopped warehouses work too, but cold-starting one costs minutes.
-    candidates.sort(key=lambda w: w.state != "RUNNING")
-    return candidates
-
-
-def _warehouse_http_path(warehouse_id: str) -> str:
-    return f"/sql/1.0/warehouses/{warehouse_id.strip()}"
-
-
-def run_usage_query(
-    workspace: str,
-    http_path: str,
-    token: str,
-    query: str,
-    on_connected: Callable[[], None] | None = None,
-) -> tuple[list[str], list[tuple]]:
-    """Run `query` on one warehouse.
-
-    `on_connected` fires once the connection opens — the point a stopped
-    warehouse has finished starting — so callers can update their progress
-    message.
-    """
-    try:
-        logging.getLogger("databricks.sql").setLevel(logging.ERROR)
-        from databricks import sql
-    except ImportError as exc:
-        raise RuntimeError(
-            "`databricks-sql-connector` is not installed. "
-            "Install it with `pip install databricks-sql-connector`."
-        ) from exc
-
-    try:
-        with sql.connect(
-            server_hostname=workspace_hostname(workspace),
-            http_path=http_path,
-            access_token=token,
-        ) as connection:
-            if on_connected is not None:
-                on_connected()
-            with connection.cursor() as cursor:
-                cursor.execute(query)
-                columns = [desc[0] for desc in (cursor.description or [])]
-                rows = cast(list[tuple], cursor.fetchall())
-    except ServerOperationError as exc:
-        if _is_usage_table_access_error(exc):
-            raise RuntimeError(
-                "Unable to read `system.ai_gateway.usage`. Ask your workspace admin "
-                "to enable READ access to `system.ai_gateway.usage` for your account."
-            ) from exc
-        raise RuntimeError(f"Usage query failed: {exc}") from exc
-    except Exception as exc:
-        raise RuntimeError(f"Usage query failed: {exc}") from exc
-
-    return columns, rows
-
-
-def _is_usage_table_access_error(exc: BaseException) -> bool:
-    """Return True when a `ServerOperationError` blocks reads of
-    `system.ai_gateway.usage` — gated on one of the bracketed error codes
-    `INSUFFICIENT_PERMISSIONS` plus a `system.ai_gateway` substring (identifier quoting
-    stripped first)."""
-    normalized = str(exc).lower().translate(str.maketrans("", "", """`[]"'"""))
-    if "system.ai_gateway" not in normalized:
-        return False
-    return "insufficient_permissions" in normalized
 
 
 # ---------------------------------------------------------------------------

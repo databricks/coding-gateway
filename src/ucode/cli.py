@@ -1167,7 +1167,10 @@ def mcp_add(
             help="Register this comma-separated subset of MCP services (additively). Full names "
             "like `system.ai.github` work on their own; bare short names like `github` need "
             "--location to locate them. Omit --services to register the whole --location schema; "
-            'an empty `--services ""` adds nothing (no-op).',
+            'an empty `--services ""` adds nothing (no-op). V2 AI Gateway servers (not in the '
+            "interactive picker) are added by naming them here: `vector-search:<catalog>.<schema>`, "
+            "`uc-functions:<catalog>.<schema>`, `external:<connection>`, `genie-space:<id>`, or "
+            "`app:<name>` (workspace access required).",
         ),
     ] = None,
     agents: Annotated[
@@ -3047,7 +3050,10 @@ def configure_mcp(
             "removing to match) instead of a whole schema. Full names like `system.ai.github` "
             "work on their own; bare short names like `github` need --location to locate them. "
             "Omit --services to configure the whole --location schema; pass an empty string "
-            "(with --location) to remove all.",
+            "(with --location) to remove all. V2 AI Gateway servers (not in the interactive "
+            "picker) are named directly: `vector-search:<catalog>.<schema>`, "
+            "`uc-functions:<catalog>.<schema>`, `external:<connection>`, `genie-space:<id>`, or "
+            "`app:<name>` (workspace access required).",
         ),
     ] = None,
 ) -> None:
@@ -3371,16 +3377,11 @@ def doctor_cmd() -> None:
 
 
 @app.command("usage")
-def usage_cmd(
-    warehouse_id: Annotated[
-        str | None,
-        typer.Option("--warehouse-id", help="SQL warehouse to query, instead of discovering one."),
-    ] = None,
-) -> None:
-    """Show Databricks AI Gateway usage summary (last 7 days)."""
+def usage_cmd() -> None:
+    """Show AI Gateway dollars spent and total budget."""
     try:
         install_databricks_cli()
-        usage_report(warehouse_id=warehouse_id)
+        usage_report()
     except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None

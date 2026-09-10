@@ -13,7 +13,6 @@ description = "Bootstrap Codex against a Databricks workspace with minimal setup
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-  "databricks-sql-connector>=3.6.0",
   # httpx is the HTTP stack for mcp 1.x. mcp 2.x uses httpx2 instead (pulled in
   # transitively by mcp itself); `ucode.mcp_proxy` selects whichever the
   # installed SDK uses at runtime, so no direct httpx2 dependency is declared.

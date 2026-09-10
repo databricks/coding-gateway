@@ -775,6 +775,30 @@ class TestConfigureSelectedTools:
         assert result["available_tools"] == ["codex"]
 
 
+class TestInvokedCommandName:
+    @pytest.mark.parametrize(
+        "argv0, expected",
+        [
+            ("/opt/homebrew/bin/ug", "ug"),
+            ("/opt/homebrew/bin/ucode", "ucode"),
+            # Unrecognized launchers (python -m, wrappers, tests) fall back to `ug`.
+            ("/usr/bin/python", "ug"),
+            ("", "ug"),
+        ],
+    )
+    def test_returns_recognized_name_or_falls_back(self, monkeypatch, argv0, expected):
+        import sys
+
+        monkeypatch.setattr(sys, "argv", [argv0])
+        assert agents_mod.invoked_command_name() == expected
+
+    def test_empty_argv_falls_back(self, monkeypatch):
+        import sys
+
+        monkeypatch.setattr(sys, "argv", [])
+        assert agents_mod.invoked_command_name() == "ug"
+
+
 class TestValidateAllToolsVerbosity:
     def _run(self, monkeypatch, capsys):
         from contextlib import nullcontext
@@ -786,13 +810,30 @@ class TestValidateAllToolsVerbosity:
         return capsys.readouterr().out
 
     def test_normal_verbosity_renders_panels(self, monkeypatch, capsys):
+        import sys
+
         import ucode.ui as ui_mod
 
         monkeypatch.setattr(ui_mod, "_verbosity", "normal")
+        monkeypatch.setattr(sys, "argv", ["/opt/homebrew/bin/ug", "configure"])
         out = self._run(monkeypatch, capsys)
         assert "Testing each tool with a quick message" in out
         assert "Ready" in out
         assert "Codex is working" in out
+        # Launched as `ug`, the Ready panel echoes `ug`.
+        assert "ug codex" in out
+        assert "ucode codex" not in out
+
+    def test_ready_panel_echoes_ucode_entrypoint(self, monkeypatch, capsys):
+        import sys
+
+        import ucode.ui as ui_mod
+
+        monkeypatch.setattr(ui_mod, "_verbosity", "normal")
+        monkeypatch.setattr(sys, "argv", ["/opt/homebrew/bin/ucode", "configure"])
+        out = self._run(monkeypatch, capsys)
+        # Launched via the `ucode` alias, the Ready panel echoes `ucode`.
+        assert "ucode codex" in out
 
     def test_low_verbosity_omits_panels(self, monkeypatch, capsys):
         import ucode.ui as ui_mod

@@ -13,8 +13,10 @@ below and to `TOOL_ALIASES` if needed.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import sys
 
 from ucode.agent_updates import available_npm_package_update
 from ucode.config_io import ToolSpec
@@ -687,6 +689,19 @@ def provider_permission_error(tool: str, state: dict, err: str) -> str:
     return err
 
 
+# Both ``ug`` and ``ucode`` are console-script entry points for this CLI (see
+# pyproject ``[project.scripts]``), so echo back whichever name the user actually
+# launched when we tell them how to run a tool. Falls back to the primary ``ug``
+# when argv[0] isn't a recognized name (``python -m ucode.cli``, a wrapper, tests).
+_COMMAND_NAMES = frozenset({"ug", "ucode"})
+
+
+def invoked_command_name() -> str:
+    """Return the entry-point name the user launched (``ug`` or ``ucode``)."""
+    name = os.path.basename(sys.argv[0]) if sys.argv else ""
+    return name if name in _COMMAND_NAMES else "ug"
+
+
 def validate_all_tools(state: dict) -> None:
     from rich.panel import Panel  # local to avoid bumping module-level deps
 
@@ -730,11 +745,12 @@ def validate_all_tools(state: dict) -> None:
     success_tools = [(t, s) for t, s in results if s]
     if success_tools and not low_verbosity:
         console.print()
+        command = invoked_command_name()
         lines = []
         for tool, _ in success_tools:
             spec = TOOL_SPECS[tool]
             lines.append(
                 f"[green]✓[/green] [bold]{spec['display']}[/bold] — "
-                f"run with [cyan]ucode {tool}[/cyan]"
+                f"run with [cyan]{command} {tool}[/cyan]"
             )
         console.print(Panel("\n".join(lines), title="Ready", style="green", expand=False))

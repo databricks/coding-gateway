@@ -21,8 +21,11 @@ pi today — they live behind /ai-gateway/mlflow/v1 with per-model
 `max_tokens` caps that pi has no global way to honor without per-model
 config we don't currently maintain.
 
-The bearer token is baked into the file and refreshed by a background thread
-while the session runs (same pattern as OpenCode/Copilot).
+Each provider's `apiKey` is pi's `!command` config value rather than a baked
+bearer, so pi mints one per request via `ucode auth-token` and nothing that
+expires is written to `models.json` (the on-demand model OpenCode's auth plugin
+already uses). A token still reaches the process environment: `launch` exports
+`OAUTH_TOKEN` as before.
 """
 
 from __future__ import annotations
@@ -30,7 +33,6 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
-import threading
 
 from ucode.config_io import (
     APP_DIR,
@@ -42,7 +44,7 @@ from ucode.config_io import (
 )
 from ucode.databricks import (
     ANTHROPIC_FAMILIES,
-    TOKEN_REFRESH_INTERVAL_SECONDS,
+    build_auth_shell_command,
     build_pi_base_urls,
     classify_model_family,
     get_databricks_token,
@@ -101,13 +103,16 @@ def _resolve_model_selector(
 
 def render_overlay(
     model: str,
-    token: str,
+    api_key: str,
     pi_base_urls: dict[str, str],
     claude_models: dict[str, str],
     codex_models: list[str],
     gemini_models: list[str],
 ) -> tuple[dict, list[list[str]]]:
-    """Return (overlay, managed_key_paths) for Pi's private agent config."""
+    """Return (overlay, managed_key_paths) for Pi's private agent config.
+
+    ``api_key`` is a pi config value, not necessarily a literal bearer: see
+    ``build_pi_api_key`` for the `!command` form every provider gets."""
     providers: dict = {}
     keys: list[list[str]] = [["model"]]
     # Pi expands header values that match an env var name. Our UA contains
@@ -119,7 +124,7 @@ def render_overlay(
         providers["databricks-claude"] = {
             "baseUrl": pi_base_urls["claude"],
             "api": "anthropic-messages",
-            "apiKey": token,
+            "apiKey": api_key,
             "authHeader": True,
             # Gateway's Anthropic translator rejects per-tool
             # `eager_input_streaming` on the streaming + tools path. Pi sends
@@ -133,7 +138,7 @@ def render_overlay(
         providers["databricks-openai"] = {
             "baseUrl": pi_base_urls["openai"],
             "api": "openai-responses",
-            "apiKey": token,
+            "apiKey": api_key,
             "authHeader": True,
             "headers": ua_headers,
             "models": [{"id": m} for m in codex_models],
@@ -143,7 +148,7 @@ def render_overlay(
         providers["databricks-gemini"] = {
             "baseUrl": pi_base_urls["gemini"],
             "api": "google-generative-ai",
-            "apiKey": token,
+            "apiKey": api_key,
             "authHeader": True,
             "headers": ua_headers,
             "models": [{"id": m} for m in gemini_models],
@@ -157,18 +162,31 @@ def render_overlay(
     return overlay, keys
 
 
+def build_pi_api_key(state: dict) -> str:
+    """Return the `!command` apiKey value pi resolves before every request.
+
+    Pi runs a leading-`!` config value as a command and uses its stdout, and it
+    resolves the provider apiKey per provider request rather than once per
+    process, so the token is minted on demand and never lands in the config.
+
+    No `--force-refresh`: pi has no token cache of its own on this path, so
+    forcing a mint would round-trip to the workspace every turn. Plain
+    `auth-token` serves the CLI's cached token until it nears expiry."""
+    return "!" + build_auth_shell_command(
+        state["workspace"],
+        state.get("profile"),
+        use_pat=bool(state.get("use_pat")),
+    )
+
+
 def write_tool_config(
     state: dict,
     model: str,
     token: str | None = None,
-    *,
-    force_refresh: bool = False,
 ) -> tuple[dict, str]:
     backup_existing_file(PI_CONFIG_PATH, PI_BACKUP_PATH)
     if token is None:
-        token = get_databricks_token(
-            state["workspace"], state.get("profile"), force_refresh=force_refresh
-        )
+        token = get_databricks_token(state["workspace"], state.get("profile"))
     pi_base_urls = state.get("base_urls", {}).get("pi") or build_pi_base_urls(state["workspace"])
     managed_families = _managed_model_families(state)
     claude_models, codex_models, gemini_models = managed_families or (
@@ -178,7 +196,7 @@ def write_tool_config(
     )
     overlay, managed_keys = render_overlay(
         model,
-        token,
+        build_pi_api_key(state),
         pi_base_urls,
         claude_models,
         codex_models,
@@ -260,20 +278,12 @@ def default_model(state: dict) -> str | None:
     return gemini_models[0] if gemini_models else None
 
 
-def _refresh_token_once(state: dict, *, force_refresh: bool = False) -> str:
+def _configure_launch(state: dict) -> str:
     model = default_model(state)
     if not model:
         raise RuntimeError("No Pi model is available on this workspace.")
-    _, token = write_tool_config(state, model, force_refresh=force_refresh)
+    _, token = write_tool_config(state, model)
     return token
-
-
-def _refresh_forever(state: dict, stop_event: threading.Event) -> None:
-    while not stop_event.wait(TOKEN_REFRESH_INTERVAL_SECONDS):
-        try:
-            _refresh_token_once(state, force_refresh=True)
-        except RuntimeError:
-            continue
 
 
 def build_runtime_env(token: str) -> dict[str, str]:
@@ -284,16 +294,9 @@ def build_runtime_env(token: str) -> dict[str, str]:
 
 
 def launch(state: dict, tool_args: list[str], *, options: LaunchOptions) -> None:
-    token = _refresh_token_once(state)
+    """Launch Pi; it re-resolves its apiKey command per request, so no refresher."""
+    token = _configure_launch(state)
     env = build_runtime_env(token)
-
-    stop_event = threading.Event()
-    refresher = threading.Thread(
-        target=_refresh_forever,
-        args=(state, stop_event),
-        daemon=True,
-    )
-    refresher.start()
 
     proc = subprocess.Popen([SPEC["binary"], *tool_args], env=env)
     try:
@@ -301,9 +304,6 @@ def launch(state: dict, tool_args: list[str], *, options: LaunchOptions) -> None
     except KeyboardInterrupt:
         proc.send_signal(signal.SIGINT)
         returncode = proc.wait()
-    finally:
-        stop_event.set()
-        refresher.join(timeout=1)
 
     raise SystemExit(returncode)
 

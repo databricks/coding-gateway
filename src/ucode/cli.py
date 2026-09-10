@@ -106,8 +106,10 @@ from ucode.mcp import (
     add_mcp_command,
     add_skills_command,
     apply_managed_mcp_servers,
+    available_mcp_clients,
     configure_mcp_command,
     configure_skills_mcp_command,
+    configured_mcp_clients,
     purge_cross_workspace_mcp_residue,
     remove_mcp_command,
     revert_mcp_configs,
@@ -1277,6 +1279,15 @@ def skills_add(
             "Not valid with --mcp.",
         ),
     ] = None,
+    agents: Annotated[
+        str | None,
+        typer.Option(
+            "--agents",
+            help="(--mcp only) Comma-separated coding agents whose skills MCP scope should "
+            "be updated. Any that aren't configured yet are set up first. Without --agents, "
+            "every configured agent is updated.",
+        ),
+    ] = None,
 ) -> None:
     """Add Databricks Skills to your coding tools, keeping any already configured.
 
@@ -1291,6 +1302,11 @@ def skills_add(
         locations = _parse_skill_locations(location)
         requested_skills = (
             None if skills is None else {s.strip() for s in skills.split(",") if s.strip()}
+        )
+        requested_agents = (
+            None
+            if agents is None
+            else ({agent.strip().lower() for agent in agents.split(",") if agent.strip()} or None)
         )
         if mcp and path is not None:
             raise RuntimeError("--path is not supported when using --mcp")
@@ -1312,6 +1328,9 @@ def skills_add(
                 "`<catalog>.<schema>.<name>` values "
                 f"(invalid: {', '.join(sorted(invalid_skills))})."
             )
+        # Downloaded skills use shared directory families, so only MCP scopes can be agent-scoped.
+        if not mcp and agents is not None:
+            raise RuntimeError("--agents is only supported when using --mcp")
         if requested_skills is not None and not locations:
             schemas = {".".join(parts[:2]) for parts in qualified_skill_parts.values()}
             bare = sorted(skill for skill in requested_skills if skill not in qualified_skill_parts)
@@ -1346,7 +1365,15 @@ def skills_add(
             None if requested_skills is None else {s.split(".")[-1] for s in requested_skills}
         )
         if mcp:
-            add_skills_command(locations)
+            if requested_agents:
+                scope = {a if a == "cursor" else normalize_tool(a) for a in requested_agents}
+                ready = set(configured_mcp_clients(load_state(), available_mcp_clients()))
+                to_bootstrap = sorted(scope - ready)
+                if to_bootstrap:
+                    _configure_agents_for_mcp(to_bootstrap)
+                add_skills_command(locations, agents=scope)
+            else:
+                add_skills_command(locations)
         else:
             configure_skills_download_command(locations, path=path, skills=selected_skills)
     except (RuntimeError, ValueError) as exc:

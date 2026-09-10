@@ -2606,6 +2606,65 @@ class TestAddSkillsCommand:
 
         assert _find_skills(state["mcp_servers"])[0]["skill_locations"] == ["A.a"]
 
+    def test_agents_updates_only_selected_client_scope(self, monkeypatch):
+        configured: list[tuple[str, str]] = []
+        prior = mcp._resolve_skills_mcp_servers(
+            WS, ["claude", "codex"], _by_client(["claude", "codex"], ["A.a"]), []
+        )
+        state = {"workspace": WS, "available_tools": ["claude", "codex"], "mcp_servers": prior}
+        _stub_location_base(monkeypatch, state)
+        monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude", "codex"])
+        monkeypatch.setattr(
+            mcp,
+            "configure_client_mcp_server",
+            lambda client, name, url, *a, **kw: configured.append((client, url)) or [],
+        )
+        monkeypatch.setattr(mcp, "save_state", lambda s: None)
+
+        assert mcp.add_skills_command(["B.b"], agents={"claude"}) == 0
+
+        entry = _find_skills(state["mcp_servers"])[0]
+        assert mcp.skill_locations_for_client(entry, "claude") == ["A.a", "B.b"]
+        assert mcp.skill_locations_for_client(entry, "codex") == ["A.a"]
+        assert configured == [("claude", f"{WS}/ai-gateway/skills/?schema=A.a&schema=B.b")]
+
+    def test_global_addition_reaches_every_client_and_keeps_divergence(self, monkeypatch):
+        prior = mcp._resolve_skills_mcp_servers(
+            WS, ["claude", "codex"], {"claude": ["A.a", "B.b"], "codex": ["A.a"]}, []
+        )
+        state = {"workspace": WS, "available_tools": ["claude", "codex"], "mcp_servers": prior}
+        _stub_location_base(monkeypatch, state)
+        monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude", "codex"])
+        monkeypatch.setattr(mcp, "configure_client_mcp_server", lambda *a, **kw: [])
+        monkeypatch.setattr(mcp, "save_state", lambda s: None)
+
+        assert mcp.add_skills_command(["C.c"]) == 0
+
+        entry = _find_skills(state["mcp_servers"])[0]
+        assert mcp.skill_locations_for_client(entry, "claude") == ["A.a", "B.b", "C.c"]
+        assert mcp.skill_locations_for_client(entry, "codex") == ["A.a", "C.c"]
+
+    def test_agents_add_matching_existing_scope_is_a_noop(self, monkeypatch):
+        configured: list[tuple[str, str]] = []
+        prior = mcp._resolve_skills_mcp_servers(
+            WS, ["claude", "codex"], _by_client(["claude", "codex"], ["A.a"]), []
+        )
+        state = {"workspace": WS, "available_tools": ["claude", "codex"], "mcp_servers": prior}
+        _stub_location_base(monkeypatch, state)
+        monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude", "codex"])
+        monkeypatch.setattr(
+            mcp,
+            "configure_client_mcp_server",
+            lambda client, name, url, *a, **kw: configured.append((client, url)) or [],
+        )
+        monkeypatch.setattr(mcp, "save_state", lambda s: None)
+
+        assert mcp.add_skills_command(["A.a"], agents={"claude"}) == 0
+
+        entry = _find_skills(state["mcp_servers"])[0]
+        assert mcp.skill_locations_for_client(entry, "claude") == ["A.a"]
+        assert configured == []
+
 
 class TestRegisterSchemalessSkillsConnection:
     def _stub(self, monkeypatch):

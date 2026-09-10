@@ -2284,10 +2284,14 @@ def _union_locations(base: list[str], new: list[str]) -> list[str]:
     return merged
 
 
-def add_skills_command(locations: list[str]) -> int:
-    """Add ``locations`` to every configured client's skill scope, keeping any already configured."""
+def add_skills_command(locations: list[str], agents: set[str] | None = None) -> int:
+    """Add ``locations`` to each targeted client's skill scope, keeping any already configured.
+
+    ``agents`` (from ``--agents``) scopes the update to that subset of configured clients; omitting
+    it targets every configured client. This mirrors ``ucode mcp add`` exactly: the client set is
+    the only thing ``--agents`` changes."""
     state = load_state()
-    workspace, profile, clients = setup_mcp_clients(state, "Add Skills MCP")
+    workspace, profile, clients = setup_mcp_clients(state, "Add Skills MCP", agents=agents)
     locations_by_client = _skill_locations_by_client_from_state(state)
     for client in clients:
         locations_by_client[client] = _union_locations(

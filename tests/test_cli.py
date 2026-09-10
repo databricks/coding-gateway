@@ -523,6 +523,26 @@ class TestSubcommandRouting:
         assert options.launch_smart_routing is expected
 
     @pytest.mark.parametrize(
+        "tool_args",
+        [
+            ["app-server", "--listen", "ws://127.0.0.1:7107"],
+            ["--remote", "ws://127.0.0.1:7107"],
+            ["--remote=ws://127.0.0.1:7107"],
+        ],
+    )
+    def test_codex_options_enable_smart_routing_for_openui_launch_shapes(self, tool_args):
+        options = cli_mod._launch_options(
+            "codex",
+            tool_args,
+            smart_routing_enabled=True,
+            explicit_prompt=False,
+            model=None,
+            provider=None,
+        )
+
+        assert options.launch_smart_routing is True
+
+    @pytest.mark.parametrize(
         ("tool_args", "expected"),
         [
             (["--session-id"], True),

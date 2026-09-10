@@ -525,7 +525,7 @@ def launch(
 
 
 def _launch_smart_routing(state: dict, tool_args: list[str]) -> None:
-    """Launch the Codex TUI through the smart-routing interposer."""
+    """Launch Codex with smart-routing configuration."""
     clear_model_preferences(state)
     binary = SPEC["binary"]
     version_text = agent_version(binary)
@@ -543,6 +543,15 @@ def _launch_smart_routing(state: dict, tool_args: list[str]) -> None:
         or (codex_model_id(models[0]) if models else None)
         or APP_SERVER_SMART_ROUTING_STARTING_MODEL
     )
+    if tool_args[:1] == ["app-server"]:
+        config_args, _ = smart_routing_v2.prepare_codex_routing(
+            state,
+            start_model=start_model,
+            render_overlay=render_overlay,
+        )
+        exec_or_spawn([binary, "app-server", *config_args, *tool_args[1:]])
+        return  # unreachable in production (exec replaces the process)
+
     smart_routing_v2.launch_codex(
         state,
         tool_args,

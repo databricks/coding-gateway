@@ -61,7 +61,7 @@ def test_proxy_imports_the_streamable_http_client_shared_by_both_majors():
 class TestDatabricksTokenAuth:
     def test_injects_bearer_from_minted_token(self, monkeypatch):
         monkeypatch.setattr(mcp_proxy, "get_databricks_token", lambda ws, profile: "tok-123")
-        auth = mcp_proxy._build_token_auth(WS, "uc-dogfood")
+        auth = mcp_proxy._build_token_auth(WS, "uc-dogfood", URL)
 
         request = httpx.Request("POST", URL)
         # auth_flow is a generator that yields the (mutated) request.
@@ -73,7 +73,7 @@ class TestDatabricksTokenAuth:
         # The auth must subclass the *same* httpx flavor's Auth as the transport,
         # or the SDK's AsyncClient won't accept it.
         monkeypatch.setattr(mcp_proxy, "get_databricks_token", lambda ws, profile: "t")
-        auth = mcp_proxy._build_token_auth(WS, None)
+        auth = mcp_proxy._build_token_auth(WS, None, URL)
 
         assert isinstance(auth, mcp_proxy._httpx().Auth)
 
@@ -84,7 +84,7 @@ class TestDatabricksTokenAuth:
             "get_databricks_token",
             lambda ws, profile: calls.append((ws, profile)) or "t",
         )
-        auth = mcp_proxy._build_token_auth(WS, "myprofile")
+        auth = mcp_proxy._build_token_auth(WS, "myprofile", URL)
 
         list(auth.auth_flow(httpx.Request("POST", URL)))
 
@@ -95,7 +95,7 @@ class TestDatabricksTokenAuth:
         # picked up mid-session without the proxy tracking expiry itself.
         tokens = iter(["first", "second"])
         monkeypatch.setattr(mcp_proxy, "get_databricks_token", lambda ws, profile: next(tokens))
-        auth = mcp_proxy._build_token_auth(WS, None)
+        auth = mcp_proxy._build_token_auth(WS, None, URL)
 
         r1 = httpx.Request("POST", URL)
         r2 = httpx.Request("POST", URL)
@@ -107,7 +107,7 @@ class TestDatabricksTokenAuth:
 
     def test_auth_flow_yields_the_same_request(self, monkeypatch):
         monkeypatch.setattr(mcp_proxy, "get_databricks_token", lambda ws, profile: "t")
-        auth = mcp_proxy._build_token_auth(WS, None)
+        auth = mcp_proxy._build_token_auth(WS, None, URL)
 
         request = httpx.Request("POST", URL)
         yielded = list(auth.auth_flow(request))
@@ -122,10 +122,89 @@ class TestDatabricksTokenAuth:
             raise RuntimeError("no access token; run `databricks auth login`")
 
         monkeypatch.setattr(mcp_proxy, "get_databricks_token", boom)
-        auth = mcp_proxy._build_token_auth(WS, "p")
+        auth = mcp_proxy._build_token_auth(WS, "p", URL)
 
         with pytest.raises(mcp_proxy.ProxyAuthError, match="databricks auth login"):
             list(auth.auth_flow(httpx.Request("POST", URL)))
+
+
+CONN_URL = f"{WS}/ai-gateway/mcp-services/system.ai.github"
+
+
+def _drive_auth_flow(auth, request, responses):
+    """Drive an httpx auth_flow generator, feeding ``responses`` back per yield.
+
+    Returns the list of requests the flow yielded (one per attempt)."""
+    gen = auth.auth_flow(request)
+    yielded = [next(gen)]
+    for response in responses:
+        try:
+            yielded.append(gen.send(response))
+        except StopIteration:
+            break
+    return yielded
+
+
+def _response(status):
+    return httpx.Response(status, request=httpx.Request("POST", CONN_URL))
+
+
+class TestConnectionLoginOn401:
+    def test_no_401_does_not_trigger_login(self, monkeypatch):
+        monkeypatch.setattr(mcp_proxy, "get_databricks_token", lambda ws, profile: "tok")
+        logins: list = []
+        monkeypatch.setattr(
+            mcp_proxy, "run_connection_login", lambda *a, **k: logins.append(1) or (True, "")
+        )
+        auth = mcp_proxy._build_token_auth(WS, "p", CONN_URL)
+
+        yielded = _drive_auth_flow(auth, httpx.Request("POST", CONN_URL), [_response(200)])
+
+        assert len(yielded) == 1  # no retry
+        assert logins == []
+
+    def test_401_drives_login_and_retries_with_fresh_token(self, monkeypatch):
+        tokens = iter(["stale", "fresh"])
+        monkeypatch.setattr(mcp_proxy, "get_databricks_token", lambda ws, profile: next(tokens))
+        calls: list[tuple] = []
+        monkeypatch.setattr(
+            mcp_proxy,
+            "run_connection_login",
+            lambda url, ws, **k: calls.append((url, ws, k.get("profile"))) or (True, "signed in"),
+        )
+        auth = mcp_proxy._build_token_auth(WS, "p", CONN_URL)
+
+        request = httpx.Request("POST", CONN_URL)
+        yielded = _drive_auth_flow(auth, request, [_response(401), _response(200)])
+
+        # Logged in for this connection's URL, then retried with the fresh token.
+        assert calls == [(CONN_URL, WS, "p")]
+        assert len(yielded) == 2
+        assert yielded[1].headers["Authorization"] == "Bearer fresh"
+
+    def test_login_failure_is_terminal(self, monkeypatch):
+        monkeypatch.setattr(mcp_proxy, "get_databricks_token", lambda ws, profile: "tok")
+        monkeypatch.setattr(
+            mcp_proxy, "run_connection_login", lambda *a, **k: (False, "user cancelled")
+        )
+        auth = mcp_proxy._build_token_auth(WS, "p", CONN_URL)
+
+        with pytest.raises(mcp_proxy.ProxyAuthError, match="user cancelled"):
+            _drive_auth_flow(auth, httpx.Request("POST", CONN_URL), [_response(401)])
+
+    def test_non_connection_url_401_does_not_trigger_login(self, monkeypatch):
+        # A 401 from a non-mcp-services endpoint is a real auth failure, left as-is.
+        monkeypatch.setattr(mcp_proxy, "get_databricks_token", lambda ws, profile: "tok")
+        logins: list = []
+        monkeypatch.setattr(
+            mcp_proxy, "run_connection_login", lambda *a, **k: logins.append(1) or (True, "")
+        )
+        auth = mcp_proxy._build_token_auth(WS, "p", URL)  # URL is not connection-backed
+
+        yielded = _drive_auth_flow(auth, httpx.Request("POST", URL), [_response(401)])
+
+        assert len(yielded) == 1  # no retry
+        assert logins == []
 
 
 class TestPump:

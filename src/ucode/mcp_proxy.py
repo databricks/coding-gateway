@@ -43,6 +43,7 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.server.stdio import stdio_server
 
 from ucode.databricks import ensure_pat_bearer, get_databricks_token
+from ucode.mcp_connection_login import connection_from_url, run_connection_login
 
 # Exit code used when the proxy cannot continue. MCP clients surface a non-zero
 # exit far more usefully than a timeout, so bail out instead of hanging.
@@ -111,29 +112,50 @@ def _fail_fast(message: str) -> None:
     raise SystemExit(AUTH_FAILURE_EXIT_CODE)
 
 
-def _build_token_auth(workspace: str, profile: str | None):
-    """Build an httpx ``Auth`` that injects a fresh bearer on every request.
+def _build_token_auth(workspace: str, profile: str | None, url: str):
+    """Build an httpx ``Auth`` that injects a fresh bearer and logs in on a 401.
 
     The base class comes from whichever httpx the SDK uses (see ``_httpx``), so
     the returned auth is accepted by that SDK's ``AsyncClient``. Behaviour is
     identical across flavours — ``Auth.auth_flow`` has the same generator
-    contract in httpx and httpx2."""
+    contract in httpx and httpx2.
+
+    For a connection-backed AI Gateway mcp-services endpoint, an HTTP 401 means
+    the per-user connection credential is missing. We drive the connection login
+    once (browser, via ``run_connection_login`` -> ``databricks auth login
+    --resource``) and retry with a fresh token, so the coding agent just sees the
+    request authenticate and succeed rather than a failed ``tools/list``."""
     httpx = _httpx()
+    connection = connection_from_url(url)
+
+    def _mint_bearer(request):
+        # get_databricks_token honors the DATABRICKS_BEARER short-circuit and PAT
+        # profiles internally; --use-pat is surfaced via the env ucode set. A
+        # RuntimeError means auth is dead (expired refresh token, logged-out
+        # profile). Raising from inside auth_flow would tear through the transport's
+        # task group and stall the process until the client times out, so translate
+        # it into a terminal ProxyAuthError the caller reports cleanly.
+        try:
+            token = get_databricks_token(workspace, profile)
+        except RuntimeError as exc:
+            raise ProxyAuthError(str(exc)) from exc
+        request.headers["Authorization"] = f"Bearer {token}"
 
     class _DatabricksTokenAuth(httpx.Auth):
         def auth_flow(self, request):
-            # get_databricks_token honors the DATABRICKS_BEARER short-circuit and
-            # PAT profiles internally; --use-pat is surfaced via the env ucode set.
-            # A RuntimeError here means auth is dead (expired refresh token,
-            # logged-out profile). Raising it from inside auth_flow would tear
-            # through the transport's task group and stall the process until the
-            # client times out, so translate it into a terminal ProxyAuthError the
-            # caller reports cleanly.
-            try:
-                token = get_databricks_token(workspace, profile)
-            except RuntimeError as exc:
-                raise ProxyAuthError(str(exc)) from exc
-            request.headers["Authorization"] = f"Bearer {token}"
+            _mint_bearer(request)
+            response = yield request
+            # Only connection-backed services have a per-user login to drive; a 401
+            # from anything else is a real auth failure, left to surface as-is.
+            if connection is None or response.status_code != 401:
+                return
+            # Blocks this proxy while the browser login runs — acceptable, since the
+            # agent is only waiting on this one connect; the CLI runs its own
+            # callback listener out of process.
+            ok, detail = run_connection_login(url, workspace, profile=profile)
+            if not ok:
+                raise ProxyAuthError(f"connection login for '{connection}' failed: {detail}")
+            _mint_bearer(request)
             yield request
 
     return _DatabricksTokenAuth()
@@ -168,7 +190,7 @@ async def _pump_upstream[T](
 
 async def _run(url: str, workspace: str, profile: str | None) -> None:
     httpx = _httpx()
-    auth = _build_token_auth(workspace, profile)
+    auth = _build_token_auth(workspace, profile, url)
     # 2.x-native shape: hand the transport a pre-built AsyncClient carrying our
     # per-request auth. Works on mcp 1.28+ and 2.x; `streamable_http_client`
     # yields a (read, write) pair in both.

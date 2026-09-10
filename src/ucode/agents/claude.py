@@ -701,7 +701,7 @@ def write_tool_config(
 
     _reconcile_managed_settings(
         state,
-        lambda base: _compose(base, enforce_model_default_hierarchy=True),
+        lambda base: _compose(base, enforce_model_default_hierarchy=provider is None),
         managed_file_keys,
         relayed,
     )
@@ -1301,6 +1301,10 @@ def launch(
 ) -> None:
     binary = SPEC["binary"]
     workspace = state.get("workspace")
+    if workspace and os.environ.get(GATEWAY_MODEL_DISCOVERY_ENV_VAR) == "1":
+        # Discovery is launch-scoped. Pass it in the process environment rather
+        # than persisting it in Claude's private or OS-managed settings.
+        os.environ["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
     if state.get("claude_relayed"):
         _launch_relayed(state, binary, tool_args)
         return
@@ -1322,10 +1326,6 @@ def launch(
             model_name=_maybe_add_1m_suffix,
         )
         return
-    if workspace and os.environ.get(GATEWAY_MODEL_DISCOVERY_ENV_VAR) == "1":
-        # Discovery is launch-scoped. Pass it in the process environment rather
-        # than persisting it in Claude's private or OS-managed settings.
-        os.environ["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
     if workspace:
         os.environ["OAUTH_TOKEN"] = get_databricks_token(workspace, state.get("profile"))
     if options.claude_launch_model:

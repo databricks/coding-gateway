@@ -872,6 +872,44 @@ class TestWriteToolConfigManagedSettings:
             "haiku": "system.ai.claude-haiku-5",  # Ucode default took priority.
         }
 
+    def test_managed_file_omits_workspace_defaults_for_provider(self, monkeypatch):
+        private_writes: list = []
+        managed_writes: list = []
+        existing = {
+            str(FAKE_MANAGED_PATH): {
+                "env": {"ANTHROPIC_DEFAULT_OPUS_MODEL": "system.ai.claude-opus-4-8"}
+            }
+        }
+        self._patch(monkeypatch, private_writes, managed_writes, existing)
+        state = {
+            "workspace": WS,
+            "claude_models": {
+                "opus": "system.ai.claude-opus-4-8",
+                "haiku": "system.ai.claude-haiku-4-6",
+            },
+        }
+
+        claude.write_tool_config(state, None, provider="main.default.anthropic")
+
+        env = json.loads(managed_writes[0][1])["env"]
+        assert not set(claude.CLAUDE_DEFAULT_MODEL_ENV_KEYS.values()) & env.keys()
+
+    def test_managed_file_keeps_provider_model_pins(self, monkeypatch):
+        private_writes: list = []
+        managed_writes: list = []
+        self._patch(monkeypatch, private_writes, managed_writes)
+        state = {"workspace": WS, "claude_models": {"opus": "system.ai.claude-opus-4-8"}}
+
+        claude.write_tool_config(
+            state,
+            None,
+            provider="main.default.bedrock",
+            provider_models={"opus": "us.anthropic.claude-opus-4-6"},
+        )
+
+        env = json.loads(managed_writes[0][1])["env"]
+        assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "us.anthropic.claude-opus-4-6"
+
     def test_managed_file_removes_fable_default_when_fable_is_disabled(self, monkeypatch):
         managed_defaults = self._write_managed_model_defaults(
             monkeypatch,
@@ -1064,6 +1102,22 @@ class TestRegisterWebSearchMcp:
 
 
 class TestClaudeLaunch:
+    def test_gateway_discovery_enabled_for_relayed_provider(self, monkeypatch):
+        calls: list[tuple[dict, str, list[str]]] = []
+        monkeypatch.setenv(claude.GATEWAY_MODEL_DISCOVERY_ENV_VAR, "1")
+        monkeypatch.delenv("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", raising=False)
+        monkeypatch.setattr(
+            claude,
+            "_launch_relayed",
+            lambda state, binary, tool_args: calls.append((state, binary, tool_args)),
+        )
+        state = {"workspace": WS, "claude_relayed": True}
+
+        claude.launch(state, ["--debug"], options=LaunchOptions())
+
+        assert os.environ["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] == "1"
+        assert calls == [(state, "claude", ["--debug"])]
+
     def test_relayed_launch_uses_refresh_proxy(self, monkeypatch):
         calls: list[tuple] = []
 

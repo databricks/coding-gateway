@@ -54,6 +54,7 @@ from ucode.databricks import (
     discover_model_services,
     ensure_databricks_auth,
     ensure_pat_bearer,
+    external_bearer_configured,
     find_profile_name_for_host,
     get_databricks_profiles,
     get_databricks_token,
@@ -546,7 +547,7 @@ def configure_shared_state(
         # token to avoid re-reading ~/.databrickscfg.
         ensure_pat_bearer(profile, pat)
         ensure_databricks_auth(workspace, profile)
-    elif force_login:
+    elif force_login and not external_bearer_configured():
         run_databricks_login(workspace, profile)
     else:
         ensure_databricks_auth(workspace, profile)

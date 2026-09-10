@@ -690,7 +690,7 @@ def resolve_sql_warehouse_id(workspace: str, token: str) -> tuple[str | None, st
 
 @overload
 def run(
-    args: list[str],
+    args: list[str] | str,
     *,
     check: bool = True,
     capture_output: bool = False,
@@ -702,7 +702,7 @@ def run(
 
 @overload
 def run(
-    args: list[str],
+    args: list[str] | str,
     *,
     check: bool = True,
     capture_output: bool = False,
@@ -713,7 +713,7 @@ def run(
 
 
 def run(
-    args: list[str],
+    args: list[str] | str,
     *,
     check: bool = True,
     capture_output: bool = False,
@@ -895,11 +895,23 @@ def _profile_args(profile: str | None) -> list[str]:
     return ["--profile", profile] if profile else []
 
 
+def external_bearer_configured() -> bool:
+    """Whether something outside ucode owns auth for this process.
+
+    True when either hatch is set: ``DATABRICKS_BEARER`` (a pre-fetched bearer)
+    or ``DATABRICKS_BEARER_COMMAND`` (one minted on demand). Both make an
+    interactive login pointless, since ``get_databricks_token`` returns before
+    it ever reaches the OAuth path."""
+    return bool(
+        os.environ.get("DATABRICKS_BEARER", "").strip()
+        or os.environ.get("DATABRICKS_BEARER_COMMAND", "").strip()
+    )
+
+
 def has_valid_databricks_auth(workspace: str, profile: str | None = None) -> bool:
-    # Honor the CI short-circuit (see ``get_databricks_token``): if a
-    # pre-fetched bearer is available, treat auth as valid and skip the
-    # `databricks auth token` shell-out (which only knows user-OAuth).
-    if os.environ.get("DATABRICKS_BEARER", "").strip():
+    # Auth owned elsewhere is valid by definition: skip the `databricks auth
+    # token` shell-out (which only knows user-OAuth) and any login it triggers.
+    if external_bearer_configured():
         return True
     _log_auth_diagnostics()
     # Mirror run_databricks_login: when ~/.databrickscfg has multiple
@@ -1126,6 +1138,46 @@ def ensure_databricks_auth(
     run_databricks_login(workspace, profile)
 
 
+def _bearer_from_command(command: str) -> str:
+    """Run ``DATABRICKS_BEARER_COMMAND`` and return the bearer it prints.
+
+    Fails closed instead of falling through to OAuth: a caller that set this
+    owns auth, and its profile usually carries no OAuth cache, so a fallback
+    would report a misleading stale-login error instead of the real cause.
+    Mirrors how ``auth-token --use-pat`` fails closed for the same reason."""
+    _debug("get_databricks_token", "using DATABRICKS_BEARER_COMMAND")
+    try:
+        # Windows takes the command line as one string and lets CreateProcess
+        # split it: shlex's POSIX rules would eat the backslashes in `C:\...`,
+        # and posix=False would keep the quotes around a path with spaces. This
+        # is the inverse of what build_auth_shell_command emits there.
+        argv = command if os.name == "nt" else shlex.split(command)
+        result = run(
+            argv,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(
+            f"DATABRICKS_BEARER_COMMAND could not be run: {type(exc).__name__}: {exc}. "
+            f"Command: {command}"
+        ) from exc
+    # Deliberately not _format_subprocess_result: that includes stdout on a
+    # non-zero exit, and this command's stdout is the bearer itself.
+    stderr = (result.stderr or "").strip()[:500]
+    _debug("bearer command", f"rc={result.returncode} stderr={stderr!r}")
+    token = (result.stdout or "").strip()
+    if result.returncode == 0 and token:
+        return token
+    # A non-zero exit fails closed even when something reached stdout: that is a
+    # diagnostic, not a bearer, and forwarding it only resurfaces as a 401.
+    reason = f"exited {result.returncode}" if result.returncode else "printed no token"
+    detail = f" Stderr: {stderr}" if stderr else ""
+    raise RuntimeError(f"DATABRICKS_BEARER_COMMAND {reason}. Command: {command}.{detail}")
+
+
 def get_databricks_token(
     workspace: str,
     profile: str | None = None,
@@ -1142,6 +1194,14 @@ def get_databricks_token(
     if bearer:
         _debug("get_databricks_token", "using DATABRICKS_BEARER env var")
         return bearer
+
+    # ``DATABRICKS_BEARER_COMMAND`` is the same escape hatch in command form,
+    # for callers whose bearer expires and has to be re-minted (an external
+    # credential broker, a sidecar). A static env var cannot be rewritten in a
+    # running process, so the command is re-run on every fetch instead.
+    command = os.environ.get("DATABRICKS_BEARER_COMMAND", "").strip()
+    if command:
+        return _bearer_from_command(command)
 
     _log_auth_diagnostics()
     # See has_valid_databricks_auth: resolve the profile from the host when
@@ -1338,7 +1398,8 @@ def build_auth_token_argv(
     Unlike the previous POSIX `databricks ... | jq` pipeline, this is a single
     executable with plain arguments — no `sh`, no `jq`, no shell quoting — so it
     runs identically on macOS, Linux, and Windows (issue #116). The DATABRICKS_BEARER
-    short-circuit and the PAT path both live inside `auth-token` itself."""
+    short-circuit, its DATABRICKS_BEARER_COMMAND counterpart, and the PAT path all
+    live inside `auth-token` itself."""
     argv = [_ucode_binary(), "auth-token", "--host", workspace.rstrip("/")]
     if profile:
         argv += ["--profile", profile]

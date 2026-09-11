@@ -43,6 +43,7 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.server.stdio import stdio_server
 
 from ucode.databricks import ensure_pat_bearer, get_databricks_token
+from ucode.mcp_connection_login import connection_from_url, run_connection_login
 
 # Exit code used when the proxy cannot continue. MCP clients surface a non-zero
 # exit far more usefully than a timeout, so bail out instead of hanging.
@@ -117,18 +118,24 @@ def _build_token_auth(workspace: str, profile: str | None):
     The base class comes from whichever httpx the SDK uses (see ``_httpx``), so
     the returned auth is accepted by that SDK's ``AsyncClient``. Behaviour is
     identical across flavours — ``Auth.auth_flow`` has the same generator
-    contract in httpx and httpx2."""
+    contract in httpx and httpx2.
+
+    The bearer is the Databricks *workspace* token, read from the session that
+    ``serve`` already established via ``databricks auth login --resource`` before
+    the bridge opened (so a connection-backed service is signed in, credential
+    and all — see ``serve``). This only *reads* that session's token (refreshing
+    it as it nears expiry); it never authenticates on its own, so it can't hand
+    the gateway a token that skips the connection login."""
     httpx = _httpx()
 
     class _DatabricksTokenAuth(httpx.Auth):
         def auth_flow(self, request):
             # get_databricks_token honors the DATABRICKS_BEARER short-circuit and
             # PAT profiles internally; --use-pat is surfaced via the env ucode set.
-            # A RuntimeError here means auth is dead (expired refresh token,
-            # logged-out profile). Raising it from inside auth_flow would tear
-            # through the transport's task group and stall the process until the
-            # client times out, so translate it into a terminal ProxyAuthError the
-            # caller reports cleanly.
+            # A RuntimeError means the session is dead (expired refresh token,
+            # logged-out profile). Raising from inside auth_flow would tear through
+            # the transport's task group and stall the process until the client
+            # times out, so translate it into a terminal ProxyAuthError.
             try:
                 token = get_databricks_token(workspace, profile)
             except RuntimeError as exc:
@@ -236,6 +243,22 @@ def serve(url: str, workspace: str, profile: str | None = None, *, use_pat: bool
             f"'{profile or '<none>'}' in ~/.databrickscfg (expected auth_type = pat). "
             "Set DATABRICKS_BEARER, or reconfigure the profile."
         )
+
+    # Connection-backed AI Gateway services need a per-user connection credential
+    # (e.g. a SaaS login) before their tools can be used. Drive that login *here*,
+    # before the bridge opens — a blocking `databricks auth login --resource
+    # <mcp-url>`, which a resource-aware /oidc routes through the connection's own
+    # sign-in (/mcp-service-login) before minting the token. The agent blocks on
+    # "connecting…" while it runs (the browser opens, or the URL is printed to this
+    # stderr), then the session comes up already authenticated — so AI Gateway is
+    # only ever called with a valid credential and never has to elicit a login. It
+    # is idempotent: once signed in, the login returns immediately with no prompt.
+    # PAT profiles have no connection OAuth to drive, so they skip it.
+    connection = None if use_pat else connection_from_url(url)
+    if connection is not None:
+        ok, detail = run_connection_login(url, workspace, profile=profile)
+        if not ok:
+            _fail_fast(f"connection login for '{connection}' failed: {detail}")
 
     # Pre-flight the token before opening the bridge. Without this, the first
     # token failure surfaces from inside the transport's task group, where it can

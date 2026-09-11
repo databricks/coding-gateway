@@ -128,6 +128,9 @@ class TestDatabricksTokenAuth:
             list(auth.auth_flow(httpx.Request("POST", URL)))
 
 
+CONN_URL = f"{WS}/ai-gateway/mcp-services/system.ai.github"
+
+
 class TestPump:
     def test_forwards_all_messages_in_order(self):
         async def scenario() -> list[str]:
@@ -391,6 +394,64 @@ class TestServe:
 
         with pytest.raises(ValueError, match="some transport bug"):
             mcp_proxy.serve(URL, WS, "p")
+
+    def test_connection_backed_url_logs_in_before_the_bridge(self, monkeypatch):
+        # A connection-backed mcp-services URL drives `databricks auth login
+        # --resource` up front (blocking), then opens the bridge — so the session
+        # is authenticated before AI Gateway is ever called.
+        order: list = []
+        monkeypatch.setattr(mcp_proxy, "_preflight_token", lambda ws, profile: None)
+        monkeypatch.setattr(
+            mcp_proxy,
+            "run_connection_login",
+            lambda url, ws, **k: (
+                order.append(("login", url, k.get("profile"))) or (True, "signed in")
+            ),
+        )
+        monkeypatch.setattr(mcp_proxy.anyio, "run", lambda func, *args: order.append(("bridge",)))
+
+        mcp_proxy.serve(CONN_URL, WS, "p")
+
+        assert order == [("login", CONN_URL, "p"), ("bridge",)]
+
+    def test_non_connection_url_skips_the_login(self, monkeypatch):
+        logins: list = []
+        monkeypatch.setattr(mcp_proxy, "_preflight_token", lambda ws, profile: None)
+        monkeypatch.setattr(
+            mcp_proxy, "run_connection_login", lambda *a, **k: logins.append(1) or (True, "")
+        )
+        monkeypatch.setattr(mcp_proxy.anyio, "run", lambda func, *args: None)
+
+        mcp_proxy.serve(URL, WS, "p")  # URL is not an mcp-services endpoint
+
+        assert logins == []
+
+    def test_connection_login_failure_exits_before_the_bridge(self, monkeypatch):
+        started: list = []
+        monkeypatch.setattr(mcp_proxy, "_preflight_token", lambda ws, profile: None)
+        monkeypatch.setattr(
+            mcp_proxy, "run_connection_login", lambda *a, **k: (False, "user cancelled")
+        )
+        monkeypatch.setattr(mcp_proxy.anyio, "run", lambda func, *args: started.append("bridge"))
+
+        with pytest.raises(SystemExit) as excinfo:
+            mcp_proxy.serve(CONN_URL, WS, "p")
+
+        assert excinfo.value.code == mcp_proxy.AUTH_FAILURE_EXIT_CODE
+        assert started == []  # never opened the bridge
+
+    def test_use_pat_skips_the_connection_login(self, monkeypatch):
+        logins: list = []
+        monkeypatch.setattr(mcp_proxy, "ensure_pat_bearer", lambda profile: True)
+        monkeypatch.setattr(mcp_proxy, "_preflight_token", lambda ws, profile: None)
+        monkeypatch.setattr(
+            mcp_proxy, "run_connection_login", lambda *a, **k: logins.append(1) or (True, "")
+        )
+        monkeypatch.setattr(mcp_proxy.anyio, "run", lambda func, *args: None)
+
+        mcp_proxy.serve(CONN_URL, WS, "p", use_pat=True)
+
+        assert logins == []  # PAT has no connection OAuth to drive
 
 
 class TestPreflightToken:

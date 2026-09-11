@@ -16,6 +16,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 from urllib import error as urllib_error
 from urllib import request as urllib_request
@@ -573,6 +574,20 @@ class TestModelProviderLaunch:
     """
 
     @staticmethod
+    def _first_relayed_service(tool: str, workspace: str, token: str) -> str:
+        services, reason = list_model_provider_services(workspace, token)
+        if is_model_provider_feature_unavailable(reason):
+            pytest.skip("Model Provider Service feature not enabled on this workspace")
+        if reason is not None:
+            pytest.skip(f"could not list provider services: {reason}")
+        names = [
+            s["name"] for s in services if service_usable_for_tool(tool, s) and s.get("relayed")
+        ]
+        if not names:
+            pytest.skip(f"no relayed {tool} model provider services available on this workspace")
+        return names[0]
+
+    @staticmethod
     def _skip_if_provider_unusable(combined: str, provider: str) -> None:
         # Environmental provider-account conditions, not ucode bugs: the test only proves routing
         # reaches the provider, so skip (rather than fail) when the account lacks a grant on the
@@ -674,6 +689,71 @@ class TestModelProviderLaunch:
         )
         self._launch_claude_and_assert_success(
             tmp_path, monkeypatch, state, provider_models, launch_model, e2e_workspace, e2e_token
+        )
+
+    def test_launch_claude_through_relayed_provider(
+        self, tmp_path, monkeypatch, e2e_state, e2e_workspace, e2e_token
+    ):
+        """Relayed (subscription-relay) launch: Claude Code authenticates to
+        Anthropic with the subscription OAuth token while the loopback proxy
+        injects the Databricks swap token. Headless runs supply the OAuth token
+        via CLAUDE_CODE_OAUTH_TOKEN (`claude setup-token` output); without it the
+        launch would open an interactive browser login, so the test skips. Also
+        needs a relayed MPS on the workspace, so it stays inert until both exist.
+        """
+        import ucode.config_io as config_io_mod
+        from ucode import gateway_proxy
+        from ucode.agents import claude
+
+        _require_binary("claude")
+        if not os.environ.get(claude.CLAUDE_CODE_OAUTH_TOKEN_ENV_VAR):
+            pytest.skip(
+                "set CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) to run the relayed launch"
+            )
+        provider = self._first_relayed_service("claude", e2e_workspace, e2e_token)
+
+        config_dir = tmp_path / "claude_config"
+        config_dir.mkdir()
+        monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
+        monkeypatch.setattr(claude, "CLAUDE_SETTINGS_PATH", config_dir / "settings.json")
+        monkeypatch.setattr(claude, "CLAUDE_BACKUP_PATH", tmp_path / "claude-settings.backup.json")
+        # The proxy mints the Databricks swap token; feed it the e2e bearer rather
+        # than shelling out to the CLI, matching the other launch tests.
+        monkeypatch.setattr(
+            gateway_proxy, "get_databricks_token", lambda ws, profile=None, **kwargs: e2e_token
+        )
+
+        # Start the real loopback refresh proxy exactly as `_launch_relayed` does,
+        # so the request is credential-swapped and relayed like a live session.
+        server, cache, client = gateway_proxy.start_proxy(
+            e2e_workspace,
+            None,
+            0,
+            token_header=gateway_proxy.AI_GATEWAY_TOKEN_HEADER,
+            force_refresh_near_expiry=False,
+        )
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            state = {**e2e_state, "workspace": e2e_workspace, "relayed_proxy_port": port}
+            with pytest.MonkeyPatch().context() as mp:
+                mp.setattr("ucode.state.save_state", lambda s: None)
+                claude.write_tool_config(state, None, provider=provider, relayed=True)
+            env = {
+                **os.environ,
+                "CLAUDE_CONFIG_DIR": str(config_dir),
+                "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{port}",
+            }
+            result = _run_agent(claude.validate_cmd("claude"), env=env, timeout=90)
+        finally:
+            cache.stop()
+            server.shutdown()
+            client.close()
+        combined = (result.stdout + result.stderr).strip()
+        self._skip_if_provider_unusable(combined, provider)
+        assert result.returncode == 0 and combined, (
+            f"relayed provider={provider} rc={result.returncode} "
+            f"stdout={result.stdout[:300]!r} stderr={result.stderr[:300]!r}"
         )
 
     def test_launch_codex_through_provider(

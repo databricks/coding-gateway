@@ -19,6 +19,8 @@ from ucode.agents import (
     explicit_model_arg_value,
     install_databricks_ai_tools_for_agents,
     install_tool_binary,
+    normalize_agent,
+    normalize_agents,
     normalize_tool,
     provider_permission_error,
     resolve_launch_model,
@@ -202,6 +204,32 @@ class TestNormalizeTool:
     def test_unknown_raises(self):
         with pytest.raises(RuntimeError, match="Unsupported"):
             normalize_tool("unknown-agent")
+
+
+class TestNormalizeAgent:
+    def test_resolves_aliases_like_normalize_tool(self):
+        assert normalize_agent("claude-code") == "claude"
+        assert normalize_agent("  Gemini-CLI ") == "gemini"
+
+    def test_accepts_cursor(self):
+        assert normalize_agent("cursor") == "cursor"
+        assert normalize_agent(" CURSOR ") == "cursor"
+
+    def test_unknown_raises(self):
+        with pytest.raises(RuntimeError, match="Unsupported"):
+            normalize_agent("unknown-agent")
+
+
+class TestNormalizeAgents:
+    def test_none_passthrough(self):
+        assert normalize_agents(None) is None
+
+    def test_empty_becomes_none(self):
+        assert normalize_agents(" , ") is None
+
+    def test_parses_dedupes_and_normalizes(self):
+        assert normalize_agents("claude-code, codex , claude") == {"claude", "codex"}
+        assert normalize_agents("cursor,claude-code") == {"cursor", "claude"}
 
 
 class TestCheckGatewayEndpoint:

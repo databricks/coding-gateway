@@ -110,6 +110,24 @@ def normalize_tool(tool: str) -> str:
     return normalized
 
 
+def normalize_agent(agent: str) -> str:
+    """Canonical name for an ``--agents`` entry. Same alias resolution as
+    ``normalize_tool`` (``claude-code`` -> ``claude``, ``gemini-cli`` -> ``gemini``),
+    plus the MCP-only ``cursor`` agent, which has no model routing and so is not a
+    ``normalize_tool`` value."""
+    if agent.strip().lower() == "cursor":
+        return "cursor"
+    return normalize_tool(agent)
+
+
+def normalize_agents(spec: str | None) -> set[str] | None:
+    """Parse a comma-separated ``--agents`` value into canonical agent names, or
+    ``None`` when unset or empty."""
+    if spec is None:
+        return None
+    return {normalize_agent(a) for a in spec.split(",") if a.strip()} or None
+
+
 def _update_installed_tool_binary(tool: str, version: str | None = None) -> bool:
     spec = TOOL_SPECS[tool]
     binary = spec["binary"]

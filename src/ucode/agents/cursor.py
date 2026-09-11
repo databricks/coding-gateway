@@ -53,6 +53,37 @@ def write_mcp_server_config(name: str, argv: list[str]) -> bool:
     return removed
 
 
+def build_http_mcp_server_entry(url: str, client_id: str) -> dict:
+    # Cursor's remote-MCP-with-OAuth schema: a `url` server plus an `auth` object
+    # naming a pre-registered OAuth client. Cursor drives the OAuth itself (to its
+    # fixed `http://localhost:8787/callback` redirect) instead of the stdio proxy,
+    # so the user gets Cursor's native connection login. Scopes are omitted — the
+    # MCP protected-resource metadata advertises them, and Cursor discovers them
+    # (the same way Claude Code's `--transport http --client-id` flow does).
+    return {
+        "url": url,
+        "auth": {"CLIENT_ID": client_id},
+    }
+
+
+def write_http_mcp_server_config(name: str, url: str, client_id: str) -> bool:
+    """Add (or replace) one **OAuth HTTP** MCP server entry in ~/.cursor/mcp.json.
+
+    Used for connection-backed AI Gateway services when the workspace has Cursor's
+    OAuth client published: Cursor authenticates directly rather than going through
+    the token-injecting stdio proxy. Merges into `mcpServers` like the stdio path;
+    returns True when an entry with this name was already present."""
+    existing = read_json_safe(CURSOR_MCP_CONFIG_PATH)
+    mcp_servers = existing.get("mcpServers")
+    if not isinstance(mcp_servers, dict):
+        mcp_servers = {}
+    removed = name in mcp_servers
+    mcp_servers[name] = build_http_mcp_server_entry(url, client_id)
+    existing["mcpServers"] = mcp_servers
+    write_json_file(CURSOR_MCP_CONFIG_PATH, existing)
+    return removed
+
+
 def remove_mcp_server_config(name: str) -> bool:
     """Surgically remove one MCP server entry from ~/.cursor/mcp.json.
 

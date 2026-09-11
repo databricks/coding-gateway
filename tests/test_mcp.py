@@ -339,16 +339,58 @@ class TestConfigureClientMcpServer:
         assert http_calls == []
         assert len(proxy_calls) == 1
 
-    def test_non_claude_client_keeps_proxy_for_aigw_service(self, monkeypatch):
-        # Only Claude's HTTP+OAuth registration is wired; other clients proxy.
-        calls: list[tuple[str, list[str]]] = []
+    def _capture_cursor(self, monkeypatch, *, cursor_client_available: bool):
+        http_calls: list[tuple[str, str, str]] = []
+        proxy_calls: list[tuple[str, list[str]]] = []
+        monkeypatch.setattr(
+            mcp, "oauth_client_available", lambda ws, client_id: cursor_client_available
+        )
+        monkeypatch.setattr(
+            mcp.cursor,
+            "write_http_mcp_server_config",
+            lambda name, url, client_id: http_calls.append((name, url, client_id)) or False,
+        )
         monkeypatch.setattr(
             mcp.cursor,
             "write_mcp_server_config",
-            lambda name, argv: calls.append((name, argv)) or False,
+            lambda name, argv: proxy_calls.append((name, argv)) or False,
         )
+        return http_calls, proxy_calls
+
+    def test_cursor_aigw_service_registers_http_when_client_available(self, monkeypatch):
+        http_calls, proxy_calls = self._capture_cursor(monkeypatch, cursor_client_available=True)
         mcp.configure_client_mcp_server("cursor", "github", AIGW_MCP_URL, WS, "p")
-        assert len(calls) == 1
+        assert http_calls == [("github", AIGW_MCP_URL, mcp.CURSOR_OAUTH_CLIENT_ID)]
+        assert proxy_calls == []
+
+    def test_cursor_aigw_service_falls_back_to_proxy_without_client(self, monkeypatch):
+        http_calls, proxy_calls = self._capture_cursor(monkeypatch, cursor_client_available=False)
+        mcp.configure_client_mcp_server("cursor", "github", AIGW_MCP_URL, WS, "p")
+        assert http_calls == []
+        assert len(proxy_calls) == 1  # workspaces without cursor-desktop keep the stdio proxy
+
+    def test_cursor_aigw_service_with_pat_keeps_proxy(self, monkeypatch):
+        # PAT auth has no interactive OAuth, so it can't use the HTTP login path.
+        http_calls, proxy_calls = self._capture_cursor(monkeypatch, cursor_client_available=True)
+        mcp.configure_client_mcp_server("cursor", "github", AIGW_MCP_URL, WS, "p", use_pat=True)
+        assert http_calls == []
+        assert len(proxy_calls) == 1
+
+    def test_oauthless_client_keeps_proxy_and_skips_probe(self, monkeypatch):
+        # An agent with no mapped OAuth client (codex) always proxies, and must not
+        # even probe /oidc — there's nothing it could pin.
+        probed: list[str] = []
+        proxy_calls: list[tuple[str, list[str]]] = []
+        monkeypatch.setattr(
+            mcp, "oauth_client_available", lambda ws, client_id: probed.append(client_id) or True
+        )
+        monkeypatch.setattr(
+            mcp, "add_codex_mcp_server", lambda name, argv: proxy_calls.append((name, argv))
+        )
+        monkeypatch.setattr(mcp, "remove_codex_mcp_server", lambda name: False)
+        mcp.configure_client_mcp_server("codex", "github", AIGW_MCP_URL, WS, "p")
+        assert len(proxy_calls) == 1
+        assert probed == []  # AGENT_OAUTH_CLIENT has no entry for codex → no probe
 
 
 class TestMcpPicker:

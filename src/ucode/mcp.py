@@ -45,6 +45,7 @@ from ucode.databricks import (
 )
 from ucode.mcp_oauth import (
     CLAUDE_CODE_OAUTH_CLIENT_ID,
+    CURSOR_OAUTH_CLIENT_ID,
     MCP_OAUTH_CALLBACK_PORT,
     oauth_client_available,
 )
@@ -68,15 +69,22 @@ MCP_PICKER_VISIBLE_ROWS = 10
 AIGW_MCP_SERVICES_PATH = "/ai-gateway/mcp-services/"
 
 # Per-agent published OAuth app used for the direct-HTTP MCP connection login.
-# ONLY Claude Code's `mcp add` supports pinning an OAuth client (`--client-id`),
-# so only it can drive the `/oidc` login for a connection-backed service and show
-# `/mcp` "needs authentication". The other agents' `mcp add` accept only a static
-# bearer, not an OAuth client — codex (`--bearer-token-env-var`), gemini
-# (`--header`), cursor (config) — so despite their published apps (codex-cli,
-# cursor-desktop, …) they can't drive this flow and stay on the stdio proxy. Add
-# an agent here — with its own `add_<agent>_http_mcp_server` — once its CLI gains
-# `--client-id` support.
-AGENT_OAUTH_CLIENT = {"claude": CLAUDE_CODE_OAUTH_CLIENT_ID}
+# These agents can pin a pre-registered OAuth client and drive the `/oidc` login
+# themselves (so `/mcp` shows "needs authentication" / Cursor shows a login), which
+# is a much better experience than the stdio proxy for a connection-backed service:
+#   - Claude Code: `claude mcp add --transport http --client-id <app>`.
+#   - Cursor: a `url` server with an `auth.CLIENT_ID` in ~/.cursor/mcp.json.
+# Both need the app *published on the workspace* (checked per-workspace via
+# `oauth_client_available`) and its loopback `/callback` redirect registered on
+# `/oidc` — which lacks dynamic client registration, so a pre-registered client is
+# required. Agents whose `mcp add` accept only a static bearer, not an OAuth client
+# — codex (`--bearer-token-env-var`), gemini (`--header`) — stay on the stdio proxy
+# even where their apps exist; add one here (with its registration branch below)
+# once its CLI can pin a client.
+AGENT_OAUTH_CLIENT = {
+    "claude": CLAUDE_CODE_OAUTH_CLIENT_ID,
+    "cursor": CURSOR_OAUTH_CLIENT_ID,
+}
 
 
 class _Back:
@@ -354,12 +362,12 @@ def configure_client_mcp_server(
     always_load: bool = False,
 ) -> list[str]:
     # Connection-backed AI Gateway MCP services register as a direct HTTP server so
-    # the agent drives the connection login natively — but only for an agent whose
-    # CLI can pin an OAuth client (AGENT_OAUTH_CLIENT: today just Claude) and only
-    # when that client is registered on the workspace. Everything else keeps the
-    # stdio proxy: non-connection MCPs, the skills registry (`always_load`), PAT
-    # auth (no interactive OAuth), agents without a mapped OAuth client, and
-    # workspaces where the mapped client isn't published.
+    # the agent drives the connection login natively — but only for an agent that can
+    # pin an OAuth client (AGENT_OAUTH_CLIENT: Claude Code, Cursor) and only when that
+    # client is registered on the workspace. Everything else keeps the stdio proxy:
+    # non-connection MCPs, the skills registry (`always_load`), PAT auth (no
+    # interactive OAuth), agents without a mapped OAuth client, and workspaces where
+    # the mapped client isn't published.
     oauth_client = AGENT_OAUTH_CLIENT.get(client)
     if (
         oauth_client is not None
@@ -368,11 +376,15 @@ def configure_client_mcp_server(
         and not use_pat
         and oauth_client_available(workspace, oauth_client)
     ):
-        removed_scopes = [
-            scope for scope in MCP_CLEANUP_SCOPES if remove_claude_mcp_server(name, scope)
-        ]
-        add_claude_http_mcp_server(name, url, client_id=oauth_client)
-        return removed_scopes
+        if client == "claude":
+            removed_scopes = [
+                scope for scope in MCP_CLEANUP_SCOPES if remove_claude_mcp_server(name, scope)
+            ]
+            add_claude_http_mcp_server(name, url, client_id=oauth_client)
+            return removed_scopes
+        if client == "cursor":
+            removed = cursor.write_http_mcp_server_config(name, url, client_id=oauth_client)
+            return [MCP_USER_SCOPE] if removed else []
 
     # Every other case registers the `ucode mcp-proxy ...` stdio command; the proxy
     # forwards to `url` and refreshes the Databricks token itself. Only the

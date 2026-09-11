@@ -31,6 +31,14 @@ from ucode.config_io import APP_DIR
 CLAUDE_CODE_OAUTH_CLIENT_ID = "claude-code"
 MCP_OAUTH_CALLBACK_PORT = 3118
 
+# Published public OAuth client Cursor authenticates with for OAuth MCP servers.
+# Cursor's `mcp.json` accepts a pre-registered `auth.CLIENT_ID` (no dynamic client
+# registration, which `/oidc` lacks) and drives the login to Cursor's fixed loopback
+# redirect `http://localhost:8787/callback`. `/oidc` matches loopback redirects by
+# path (RFC 8252 §8.4), so the registered `/callback` path is what matters — the
+# same requirement `claude-code` satisfies.
+CURSOR_OAUTH_CLIENT_ID = "cursor-desktop"
+
 # Published apps rarely appear/disappear, so a per-workspace probe result is good
 # for a while; delete the cache file to force a re-probe.
 _CACHE_PATH = APP_DIR / "oauth_client_cache.json"
@@ -113,6 +121,7 @@ def oauth_client_available(workspace: str, client_id: str) -> bool:
 
 __all__ = [
     "CLAUDE_CODE_OAUTH_CLIENT_ID",
+    "CURSOR_OAUTH_CLIENT_ID",
     "MCP_OAUTH_CALLBACK_PORT",
     "oauth_client_available",
 ]

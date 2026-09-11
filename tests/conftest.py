@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 
 import pytest
 
@@ -57,6 +58,29 @@ def _isolate_ucode_state(tmp_path, monkeypatch):
     # The model-services listing is memoized for the life of the process, so without this a cached
     # result would leak into the next test and make a stubbed listing look like it was never called.
     databricks_mod.clear_model_services_cache()
+
+
+@pytest.fixture()
+def short_tmp_path():
+    """A temporary directory with a short absolute path.
+
+    pytest's ``tmp_path`` fixture generates paths up to ~121 characters on
+    macOS (e.g. ``/private/var/folders/.../pytest-N/test_name0/``).  Unix
+    domain sockets (``AF_UNIX``) on macOS have a hard path-length limit of
+    104 characters, so any ``.sock`` file placed inside ``tmp_path`` silently
+    raises ``OSError: AF_UNIX path too long``.  This fixture uses
+    ``tempfile.mkdtemp()`` which produces short paths like
+    ``/var/folders/.../T/tmpXXXXXX`` (≤ 60 chars), safely inside the limit.
+    Use it in place of ``tmp_path`` whenever the test creates a Unix socket.
+    """
+    import shutil
+    from pathlib import Path
+
+    d = tempfile.mkdtemp()
+    try:
+        yield Path(d)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def _workspace() -> str:

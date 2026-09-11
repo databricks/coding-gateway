@@ -106,6 +106,7 @@ from ucode.mcp import (
     SKILLS_MCP_KIND,
     add_mcp_command,
     add_skills_command,
+    agents_share_one_scope,
     apply_managed_mcp_servers,
     available_mcp_clients,
     configure_mcp_command,
@@ -998,25 +999,18 @@ def status() -> int:
     if not skill_mcp_entry:
         print_kv("Skills", "not configured")
     else:
-        configured_clients = [
-            client for client in (skill_mcp_entry.get("clients") or []) if client in MCP_CLIENTS
-        ]
         scopes = {
             client: skill_locations_for_client(skill_mcp_entry, client)
-            for client in configured_clients
+            for client in (skill_mcp_entry.get("clients") or [])
+            if client in MCP_CLIENTS
         }
-        # Collapse to one line when every agent shares a scope; split per agent when they diverge.
-        if len({tuple(locations) for locations in scopes.values()}) <= 1:
-            locations = next(
-                iter(scopes.values()), list(skill_mcp_entry.get("skill_locations") or [])
-            )
+        if agents_share_one_scope(scopes):
+            locations = next(iter(scopes.values()), [])
             print_kv(
                 "Skill MCP Locations",
                 ", ".join(locations) if locations else "none — utility tools only",
             )
-            configured_agents = [
-                str(MCP_CLIENTS[client]["display"]) for client in configured_clients
-            ]
+            configured_agents = [str(MCP_CLIENTS[client]["display"]) for client in scopes]
             print_kv("Configured", ", ".join(configured_agents) if configured_agents else "none")
         else:
             for client, locations in scopes.items():

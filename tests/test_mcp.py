@@ -2360,6 +2360,17 @@ class TestSkillsToolsDescription:
         )
 
 
+class TestAgentsShareOneScope:
+    def test_true_when_scopes_match(self):
+        assert mcp.agents_share_one_scope({"claude": ["a.b"], "codex": ["a.b"]}) is True
+
+    def test_false_when_scopes_diverge(self):
+        assert mcp.agents_share_one_scope({"claude": ["a.b"], "codex": ["c.d"]}) is False
+
+    def test_true_with_no_configured_clients(self):
+        assert mcp.agents_share_one_scope({}) is True
+
+
 class TestPrintSkillsSummary:
     def _entry(self, locations):
         clients = ["claude", "codex"]

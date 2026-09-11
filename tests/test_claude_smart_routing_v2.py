@@ -172,21 +172,7 @@ class TestV2Launch:
     def test_restores_model_captured_immediately_before_switch(self, tmp_path, monkeypatch):
         ucode_settings = tmp_path / "ucode-settings.json"
         user_settings = tmp_path / "settings.json"
-        ucode_settings.write_text(
-            json.dumps(
-                {
-                    "env": {
-                        "ANTHROPIC_BASE_URL": "https://gw",
-                        "ANTHROPIC_CUSTOM_HEADERS": "\n".join(
-                            [
-                                "x-databricks-traffic-id: testenv://liteswap/arnav-r315-task-v3",
-                                'Databricks-Ai-Gateway-Request-Tags: {"source":"isaac-cli"}',
-                            ]
-                        ),
-                    }
-                }
-            )
-        )
+        ucode_settings.write_text(json.dumps({"env": {"ANTHROPIC_BASE_URL": "https://gw"}}))
         user_settings.write_text(json.dumps({"model": "opus", "theme": "dark"}))
         monkeypatch.setattr(claude, "APP_DIR", tmp_path)
         monkeypatch.setattr(claude, "CLAUDE_SETTINGS_PATH", ucode_settings)
@@ -203,17 +189,15 @@ class TestV2Launch:
                 model_id_to_display_name={"system.ai.claude-sonnet-5": "Claude Sonnet 5"},
             ),
         )
-        routed_call = {}
-
-        def route_claude_prompt(*_args, **kwargs):
-            routed_call.update(kwargs)
-            return v2.routing.RoutingDecision(
+        monkeypatch.setattr(
+            v2,
+            "_route_claude_prompt",
+            lambda *_args: v2.routing.RoutingDecision(
                 model="system.ai.claude-sonnet-5",
                 raw_model="claude-sonnet-5",
                 rationale="Selected for the parser task.",
-            )
-
-        monkeypatch.setattr(v2, "_route_claude_prompt", route_claude_prompt)
+            ),
+        )
         captured: dict = {}
 
         def fake_run(argv, **kwargs):
@@ -419,6 +403,7 @@ class TestSubagentRouting:
         captured = {}
         decisions_path = tmp_path / "decisions.jsonl"
         monkeypatch.setattr(v2.claude_routing, "DECISIONS_PATH", decisions_path)
+
         def fake_select(workspace, token, task, route_options, resolve, **kwargs):
             captured.update(
                 workspace=workspace,

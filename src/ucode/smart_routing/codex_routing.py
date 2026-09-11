@@ -7,12 +7,14 @@ detector, the Codex model-id translation, and the artifact paths.
 
 from __future__ import annotations
 
+import json
 import re
 
 # Re-exported so tests can patch the shared ``urlopen`` seam via
 # ``codex_routing.urllib.request`` — the actual call lives in ``routing``, but
 # Python modules are singletons so patching this name patches the one call site.
 import urllib.request  # noqa: F401
+from collections.abc import Callable
 from typing import Any
 
 from ucode.config_io import APP_DIR
@@ -39,6 +41,7 @@ def request_routing_decision(
     available_models: list[str],
     *,
     timeout: float = REQUEST_TIMEOUT_S,
+    log: Callable[[str], None] | None = None,
 ) -> tuple[RoutingDecision | None, str | None]:
     """Ask the router for a servable Codex model."""
     available = {_normalize_model(model): model for model in available_models}
@@ -46,14 +49,24 @@ def request_routing_decision(
     if not route_options:
         return None, "no cached model services are available"
     router_name = routing.configured_router_name()
-    select_kwargs: dict[str, Any] = {"router_name": router_name, "timeout": timeout}
+    if log is not None:
+        payload = {
+            "route_options": [
+                {"model": model, "harness": harness} for model, harness in route_options
+            ],
+            "task": {"prompt": task},
+            "route_selector": {"router_name": router_name},
+        }
+        url = workspace.rstrip("/") + ROUTING_PATH
+        log(f"[ROUTE] request POST {url}: {json.dumps(payload, separators=(',', ':'))}")
     return routing.select_route(
         workspace,
         token,
         task,
         route_options,
         lambda raw_model: available.get(_normalize_model(raw_model)),
-        **select_kwargs,
+        router_name=router_name,
+        timeout=timeout,
     )
 
 
@@ -83,11 +96,7 @@ def route_pre_tool_use(
         payload,
         is_spawn_agent=is_spawn_agent_tool,
         decision_fn=lambda task: request_routing_decision(
-            workspace,
-            token,
-            task,
-            available_models,
-            timeout=timeout,
+            workspace, token, task, available_models, timeout=timeout
         ),
         default_task_label="Codex subagent task",
         model_id_mapper=codex_model_id,

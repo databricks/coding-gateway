@@ -29,6 +29,7 @@ SPAWN_AGENT_TOOL_NAMES = ("agent", "task")
 CANARY_PATH = APP_DIR / "claude-smart-routing-canary.json"
 AUDIT_PATH = APP_DIR / "claude-smart-routing-audit.jsonl"
 DECISIONS_PATH = APP_DIR / "claude-smart-routing-decisions.jsonl"
+
 _normalize_model = routing.normalize_model
 
 
@@ -89,16 +90,14 @@ def request_routing_decision(
     if missing:
         return None, f"required Claude routing models are unavailable: {', '.join(missing)}"
 
-    route_options = [(arm, "claude") for arm in CLAUDE_ROUTE_ARMS]
-    router_name = routing.configured_router_name()
-    select_kwargs: dict[str, Any] = {"router_name": router_name, "timeout": timeout}
     return routing.select_route(
         workspace,
         token,
         task,
-        route_options,
+        [(arm, "claude") for arm in CLAUDE_ROUTE_ARMS],
         lambda raw_model: available.get(_normalize_model(raw_model)),
-        **select_kwargs,
+        router_name=routing.configured_router_name(),
+        timeout=timeout,
     )
 
 
@@ -122,11 +121,7 @@ def route_pre_tool_use(
         payload,
         is_spawn_agent=is_spawn_agent_tool,
         decision_fn=lambda task: request_routing_decision(
-            workspace,
-            token,
-            task,
-            available_models,
-            timeout=timeout,
+            workspace, token, task, available_models, timeout=timeout
         ),
         default_task_label="Claude Code subagent task",
         model_id_mapper=_claude_model_id,

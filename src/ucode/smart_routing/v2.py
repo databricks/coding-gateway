@@ -246,18 +246,14 @@ def _request_claude_routing_decision(
     if not available:
         return None, "Anthropic models endpoint returned no Claude models"
     route_options = [(model, "claude") for model in available]
-    router_name = routing.configured_router_name()
-    select_kwargs: dict[str, object] = {
-        "router_name": router_name,
-        "timeout": CLAUDE_ROUTE_SELECTION_TIMEOUT_S,
-    }
     return routing.select_route(
         workspace,
         token,
         prompt,
         route_options,
         lambda selected: available.get(_claude_router_model_id(selected)),
-        **select_kwargs,
+        router_name=routing.configured_router_name(),
+        timeout=CLAUDE_ROUTE_SELECTION_TIMEOUT_S,
     )
 
 
@@ -277,12 +273,7 @@ def _route_claude_prompt(
             raise RuntimeError(
                 discovery_error or "Anthropic models endpoint returned no Claude models"
             )
-    decision, error = _request_claude_routing_decision(
-        workspace,
-        token,
-        prompt,
-        model_ids,
-    )
+    decision, error = _request_claude_routing_decision(workspace, token, prompt, model_ids)
     if decision is None:
         raise RuntimeError(error or "router returned no Claude model selection")
     return decision
@@ -301,10 +292,7 @@ def route_claude_pre_tool_use(
         payload,
         is_spawn_agent=claude_routing.is_spawn_agent_tool,
         decision_fn=lambda task: _request_claude_routing_decision(
-            workspace,
-            token,
-            task,
-            available_models,
+            workspace, token, task, available_models
         ),
         default_task_label="Claude Code subagent task",
         model_id_mapper=lambda model: model,
@@ -446,12 +434,7 @@ def launch_claude(
     model_setting = _ClaudeModelSettingGuard(user_settings_path)
 
     def route_prompt(prompt: str) -> claude_pty.FirstPromptRoute:
-        decision = _route_claude_prompt(
-            state,
-            token,
-            prompt,
-            model_ids,
-        )
+        decision = _route_claude_prompt(state, token, prompt, model_ids)
         return claude_pty.FirstPromptRoute(
             model=model_name(_unwrapped_claude_model_id(decision.model)),
             display_model=catalog.model_id_to_display_name.get(decision.model, decision.model),
@@ -460,7 +443,7 @@ def launch_claude(
 
     print_note(
         "Smart routing v2: the first submitted prompt will select Claude Code's "
-        "model."
+        f"model; log: {CLAUDE_PTY_LOG}."
     )
     try:
         returncode = claude_pty.run_claude_pty(

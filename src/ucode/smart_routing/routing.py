@@ -104,20 +104,6 @@ def configured_router_name() -> str:
     return os.environ.get(ROUTER_NAME_ENV_VAR, "").strip() or ROUTER_NAME
 
 
-def route_request_body(
-    task: str,
-    route_options: Iterable[tuple[str, str | None]],
-    *,
-    router_name: str,
-) -> dict[str, Any]:
-    """Return the JSON body sent to ``routes:select``."""
-    return {
-        "route_options": [{"model": model, "harness": harness} for model, harness in route_options],
-        "task": {"prompt": task},
-        "route_selector": {"router_name": router_name},
-    }
-
-
 def select_route(
     workspace: str,
     token: str,
@@ -136,7 +122,11 @@ def select_route(
     None when the arm is unservable. Returns ``(decision, error)``; a failed
     call yields ``(None, reason)`` so callers can fail open.
     """
-    body = route_request_body(task, route_options, router_name=router_name)
+    body = {
+        "route_options": [{"model": model, "harness": harness} for model, harness in route_options],
+        "task": {"prompt": task},
+        "route_selector": {"router_name": router_name},
+    }
     request = urllib.request.Request(
         workspace.rstrip("/") + ROUTING_PATH,
         data=json.dumps(body).encode("utf-8"),

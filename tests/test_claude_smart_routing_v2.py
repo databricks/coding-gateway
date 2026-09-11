@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
 import time
@@ -348,6 +349,69 @@ class TestV2Launch:
             "model": v2.CLAUDE_TARGET_MODEL,
             "theme": "dark",
         }
+
+
+class TestV2ModelPickerDiscovery:
+    """modelPicker takes priority over gateway model discovery for smart routing."""
+
+    @staticmethod
+    def _launch(monkeypatch, tmp_path, *, picker_catalog):
+        user_settings = tmp_path / "settings.json"
+        user_settings.write_text(json.dumps({"model": "opus"}))
+        monkeypatch.setattr(v2, "APP_DIR", tmp_path)
+        monkeypatch.setattr(v2, "CLAUDE_PTY_LOG", tmp_path / "v2.log")
+        monkeypatch.setattr(v2, "get_databricks_token", lambda *_args, **_kwargs: "token")
+        monkeypatch.setattr(v2, "build_auth_token_argv", lambda *_args, **_kwargs: ["ucode"])
+        monkeypatch.setattr(v2, "_model_picker_catalog", lambda: picker_catalog)
+
+        discovery_calls = 0
+
+        def fake_discovery(*_args):
+            nonlocal discovery_calls
+            discovery_calls += 1
+            return AnthropicModelCatalog(
+                model_ids=["system.ai.claude-opus-4-8"], model_id_to_display_name={}
+            )
+
+        monkeypatch.setattr(v2, "list_anthropic_model_catalog", fake_discovery)
+        monkeypatch.setattr(claude_pty, "run_claude_pty", lambda _argv, **_kwargs: 0)
+
+        with pytest.raises(SystemExit) as exc:
+            v2.launch_claude(
+                {"workspace": "https://example.com"},
+                [],
+                binary="claude",
+                user_settings_path=user_settings,
+                launch_model="opus",
+                compose_settings=lambda _args: ({}, []),
+                launch_model_args=claude._launch_model_args,
+                model_name=claude._maybe_add_1m_suffix,
+            )
+        assert exc.value.code == 0
+        return discovery_calls
+
+    def test_model_picker_disables_model_discovery(self, tmp_path, monkeypatch):
+        discovery_calls = self._launch(
+            monkeypatch,
+            tmp_path,
+            picker_catalog=AnthropicModelCatalog(
+                model_ids=["system.ai.claude-opus-4-8", "system.ai.claude-sonnet-5"],
+                model_id_to_display_name={},
+            ),
+        )
+        # The picker supplied the models, so discovery never ran and the launch left
+        # gateway model discovery disabled instead of enabling it alongside the picker.
+        assert discovery_calls == 0
+        assert "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY" not in os.environ
+        assert "ENABLE_CLAUDE_CODE_GATEWAY_MODEL_DISCOVERY" not in os.environ
+
+    def test_no_model_picker_enables_model_discovery(self, tmp_path, monkeypatch):
+        discovery_calls = self._launch(monkeypatch, tmp_path, picker_catalog=None)
+        # Without a picker the router falls back to gateway discovery and enables Claude
+        # Code's model-discovery feature for the launch.
+        assert discovery_calls == 1
+        assert os.environ.get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY") == "1"
+        assert os.environ.get("ENABLE_CLAUDE_CODE_GATEWAY_MODEL_DISCOVERY") == "1"
 
 
 class TestSubagentRouting:

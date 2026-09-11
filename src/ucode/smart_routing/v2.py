@@ -393,10 +393,14 @@ def launch_claude(
         )
     token = get_databricks_token(workspace, state.get("profile"))
     os.environ[OAUTH_TOKEN_ENV_VAR] = token
-    os.environ[GATEWAY_MODEL_DISCOVERY_ENV_VAR] = "1"
-    os.environ["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
-    # modelPicker takes priority over model discovery.
-    catalog = _model_picker_catalog() or list_anthropic_model_catalog(workspace, token)
+    # if modelPicker is defined, then skip model discovery.
+    picker_catalog = _model_picker_catalog()
+    if picker_catalog is None:
+        os.environ[GATEWAY_MODEL_DISCOVERY_ENV_VAR] = "1"
+        os.environ["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
+        catalog = list_anthropic_model_catalog(workspace, token)
+    else:
+        catalog = picker_catalog
     if not catalog.model_ids:
         raise RuntimeError(
             catalog.error_msg or "Anthropic models endpoint returned no Claude models"

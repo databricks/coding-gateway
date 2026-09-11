@@ -353,6 +353,10 @@ class TestPiUserAgent:
             pi.write_tool_config(state, "test-claude-model", token="test-token")
 
         env = pi.build_runtime_env("test-token")
+        # Pi now resolves its apiKey by running `ucode auth-token`. The static
+        # bearer short-circuit gives that command something to print without a
+        # real workspace behind the capture server.
+        env["DATABRICKS_BEARER"] = "test-token"
         result = _run_until_first_request(pi.validate_cmd("pi"), env)
 
         req = capture_server.first_request_with_path_prefix("/ai-gateway/anthropic")

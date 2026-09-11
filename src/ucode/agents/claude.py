@@ -57,6 +57,8 @@ from ucode.ui import print_note, print_success, print_warning
 from .args import LaunchOptions, has_explicit_model_arg
 
 GATEWAY_MODEL_DISCOVERY_ENV_VAR = "ENABLE_CLAUDE_CODE_GATEWAY_MODEL_DISCOVERY"
+# If set, Claude Code launches in headless mode instead of the interactive login flow.
+CLAUDE_CODE_OAUTH_TOKEN_ENV_VAR = "CLAUDE_CODE_OAUTH_TOKEN"
 CLAUDE_CONFIG_DIR = Path.home() / ".claude"
 CLAUDE_SETTINGS_PATH = CLAUDE_CONFIG_DIR / "ucode-settings.json"
 CLAUDE_MCP_CONFIG_PATH = Path.home() / ".claude.json"
@@ -1235,6 +1237,11 @@ def _ensure_subscription_login() -> None:
     """Ensure Claude Code has a persisted subscription login, running the browser
     flow via `claude auth login` if not. ucode never sees or stores the token —
     Claude Code persists it to its own secure store and refreshes it natively."""
+    # The OAuth token is the Authorization credential directly, so no interactive login
+    # applies — return early so unattended runs can't hang on the browser fallback.
+    is_headless_mode = os.environ.get(CLAUDE_CODE_OAUTH_TOKEN_ENV_VAR)
+    if is_headless_mode:
+        return
     if _has_subscription_login():
         return
     print_note("Opening browser to sign in with your Claude subscription...")

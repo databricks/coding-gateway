@@ -3762,3 +3762,48 @@ class TestMcpProxyCmdForwardsUsePat:
         result, captured = self._invoke(monkeypatch, flag=False, state={"workspace": "https://x"})
         assert result.exit_code == 0, result.output
         assert captured["kwargs"]["use_pat"] is False
+
+
+class TestForcedLoginWithExternalBearer:
+    """`configure --workspaces` forces `databricks auth login`, which cannot help
+    when a bearer (or a command that mints one) is supplied from outside: the
+    login is interactive, and `get_databricks_token` returns before it would ever
+    reach the OAuth path. A sandbox whose credential comes from a broker would
+    otherwise hang on a browser prompt it can never satisfy."""
+
+    _SENTINEL = "stop-after-auth"
+
+    def _run(self, monkeypatch) -> list:
+        """Drive configure_shared_state's auth branch, stopping right after it."""
+        calls: list = []
+        monkeypatch.setattr(
+            cli_mod, "run_databricks_login", lambda ws, profile=None: calls.append(ws)
+        )
+        monkeypatch.setattr(cli_mod, "ensure_databricks_auth", lambda *a, **k: None)
+        monkeypatch.setattr(cli_mod, "find_profile_name_for_host", lambda ws: None)
+
+        def stop(*_a, **_k):
+            raise RuntimeError(self._SENTINEL)
+
+        monkeypatch.setattr(cli_mod, "get_databricks_token", stop)
+        with pytest.raises(RuntimeError, match=self._SENTINEL):
+            cli_mod.configure_shared_state("https://ws.cloud.databricks.com", force_login=True)
+        return calls
+
+    def test_bearer_command_skips_the_interactive_login(self, monkeypatch):
+        monkeypatch.setenv("DATABRICKS_BEARER_COMMAND", "/opt/broker/mint.sh")
+        monkeypatch.delenv("DATABRICKS_BEARER", raising=False)
+
+        assert self._run(monkeypatch) == []
+
+    def test_static_bearer_skips_the_interactive_login(self, monkeypatch):
+        monkeypatch.setenv("DATABRICKS_BEARER", "ci-bearer")
+        monkeypatch.delenv("DATABRICKS_BEARER_COMMAND", raising=False)
+
+        assert self._run(monkeypatch) == []
+
+    def test_still_logs_in_when_nothing_external_is_set(self, monkeypatch):
+        monkeypatch.delenv("DATABRICKS_BEARER", raising=False)
+        monkeypatch.delenv("DATABRICKS_BEARER_COMMAND", raising=False)
+
+        assert self._run(monkeypatch) == ["https://ws.cloud.databricks.com"]

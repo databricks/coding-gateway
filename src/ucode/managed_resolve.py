@@ -84,6 +84,13 @@ def managed_state_overrides(managed: dict, tool: str) -> dict[str, object]:
     default_model = _str(_agent_model_config(managed, tool).get("default_model"))
     if default_model:
         overrides[f"{tool}_default_model"] = default_model
+    if tool in ("claude", "codex"):
+        static_models = managed_static_models(managed, tool)
+        if static_models:
+            overrides[f"{tool}_static_models"] = static_models
+        location = managed_model_service_location(managed, tool)
+        if location:
+            overrides[f"{tool}_model_service_location"] = location
     return overrides
 
 
@@ -163,6 +170,11 @@ def managed_supplies_models(managed: dict | None, tool: str) -> bool:
     model_config = _agent_model_config(managed or {}, tool)
     if _str(model_config.get("model_provider_service")) or _str(model_config.get("default_model")):
         return True
+    if tool in ("claude", "codex") and (
+        managed_static_models(managed or {}, tool)
+        or _str(model_config.get("model_service_location"))
+    ):
+        return True
     models = model_config.get("models")
     if isinstance(models, dict):
         return any(_str(value) for value in models.values())
@@ -174,6 +186,26 @@ def managed_supplies_models(managed: dict | None, tool: str) -> bool:
 def managed_provider_service(managed: dict, tool: str) -> str | None:
     """Return only the provider the managed config specifies for ``tool``, ignoring local state."""
     return _str(_agent_model_config(managed, tool).get("model_provider_service"))
+
+
+def managed_static_models(managed: dict, tool: str) -> list[str] | None:
+    """The explicit model allow-list (``models.names``) the config sets for ``tool``, or None.
+
+    Static curation: the launch path writes exactly these into the agent's own picker allow-list
+    (Claude ``availableModels``/``modelPicker``, Codex ``model_catalog_json``) instead of discovering
+    the workspace's models. The order is the admin's; empty and non-string entries are dropped."""
+    names = _agent_model_config(managed, tool).get("names")
+    if isinstance(names, list):
+        listed = [model for model in (_str(item) for item in names) if model]
+        return listed or None
+    return None
+
+
+def managed_model_service_location(managed: dict, tool: str) -> str | None:
+    """The UC catalog/schema (``models.model_service_location``) the config points ``tool`` at for
+    auto model discovery, or None. The agent discovers from the gateway rather than ucode pinning a
+    list, so the launch path only turns discovery on for this source."""
+    return _str(_agent_model_config(managed, tool).get("model_service_location"))
 
 
 def managed_default_model(managed: dict, tool: str) -> str | None:

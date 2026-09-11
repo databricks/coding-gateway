@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -732,3 +733,71 @@ class TestCodexManagedConfig:
             codex.write_tool_config({"workspace": WS, "codex_models": ["gpt-5"]})
 
         assert managed_path.read_text(encoding="utf-8") == "[invalid"
+
+
+class TestCodexStaticCatalog:
+    """A managed static `names` list is written as a `model_catalog_json` catalog of full presets."""
+
+    def test_build_catalog_emits_full_presets_in_order(self):
+        catalog = codex.build_codex_catalog(["system.ai.kimi-k3", "gpt-5.4"])
+        assert list(catalog) == ["models"]
+        first, second = catalog["models"]
+        assert first["slug"] == "system.ai.kimi-k3"
+        assert first["display_name"] == "kimi-k3"
+        assert first["visibility"] == "list"
+        assert first["shell_type"] == "shell_command"
+        assert first["truncation_policy"] == {"mode": "tokens", "limit": 10000}
+        assert first["supported_reasoning_levels"][0]["effort"] == "low"
+        # Admin list order preserved via descending priority (first is highest).
+        assert first["priority"] > second["priority"]
+
+    def test_write_config_emits_catalog_file_and_reference(self, tmp_path, monkeypatch):
+        config_path = tmp_path / ".codex" / "ucode.config.toml"
+        catalog_path = tmp_path / ".codex" / "ucode-models.json"
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", config_path)
+        monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", tmp_path / "backup.toml")
+        monkeypatch.setattr(codex, "CODEX_CATALOG_PATH", catalog_path)
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.134.0")
+        monkeypatch.setattr(codex, "save_state", lambda state: None)
+
+        codex.write_tool_config(
+            {"workspace": WS, "codex_static_models": ["system.ai.kimi-k3", "gpt-5.4"]}
+        )
+
+        doc = read_toml_safe(config_path)
+        assert doc["model_catalog_json"] == str(catalog_path)
+        written = json.loads(catalog_path.read_text())
+        assert [m["slug"] for m in written["models"]] == ["system.ai.kimi-k3", "gpt-5.4"]
+
+    def test_stale_catalog_removed_when_no_static_list(self, tmp_path, monkeypatch):
+        config_path = tmp_path / ".codex" / "ucode.config.toml"
+        catalog_path = tmp_path / ".codex" / "ucode-models.json"
+        catalog_path.parent.mkdir(parents=True, exist_ok=True)
+        catalog_path.write_text('{"models": []}')
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", config_path)
+        monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", tmp_path / "backup.toml")
+        monkeypatch.setattr(codex, "CODEX_CATALOG_PATH", catalog_path)
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.134.0")
+        monkeypatch.setattr(codex, "save_state", lambda state: None)
+
+        codex.write_tool_config({"workspace": WS})
+
+        assert not catalog_path.exists()
+        assert "model_catalog_json" not in read_toml_safe(config_path)
+
+    def test_provider_suppresses_static_catalog(self, tmp_path, monkeypatch):
+        config_path = tmp_path / ".codex" / "ucode.config.toml"
+        catalog_path = tmp_path / ".codex" / "ucode-models.json"
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", config_path)
+        monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", tmp_path / "backup.toml")
+        monkeypatch.setattr(codex, "CODEX_CATALOG_PATH", catalog_path)
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.134.0")
+        monkeypatch.setattr(codex, "save_state", lambda state: None)
+
+        codex.write_tool_config(
+            {"workspace": WS, "codex_static_models": ["system.ai.kimi-k3"]},
+            provider="main.default.mps",
+        )
+
+        assert not catalog_path.exists()
+        assert "model_catalog_json" not in read_toml_safe(config_path)

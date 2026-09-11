@@ -1114,30 +1114,26 @@ def _configure_agents_for_mcp(
     requested: list[str], *, prompt_optional_updates: bool = True
 ) -> set[str]:
     """Ensure the named coding agents are set up (workspace + models) so a
-    subsequent `ug mcp add` has them as targets, and return their canonical
-    names. Mirrors `ug configure --agents`: model agents go through
+    subsequent `ug mcp add` / `ug skill add --mcp` has them as targets, and
+    return the full canonical name set. Agents already configured are left as-is;
+    only the rest are bootstrapped. Model agents go through
     configure_workspace_command (which installs binaries and configures models);
     Cursor is MCP-only, so it just needs workspace state established and rides
     along via MCP_ONLY_CLIENTS. Interactive — prompts for the workspace URL on
     first run."""
-    wants_cursor = "cursor" in requested
-    model_agent_names = ",".join(a for a in requested if a != "cursor")
-    configured: set[str] = set()
-    if model_agent_names:
-        selected_tools = _parse_agents_option(model_agent_names)
+    scope = {a if a == "cursor" else normalize_tool(a) for a in requested}
+    ready = set(configured_mcp_clients(load_state(), available_mcp_clients()))
+    to_bootstrap = scope - ready
+    model_agents = sorted(a for a in to_bootstrap if a != "cursor")
+    if model_agents:
         configure_workspace_command(
-            selected_tools=selected_tools, prompt_optional_updates=prompt_optional_updates
+            selected_tools=model_agents, prompt_optional_updates=prompt_optional_updates
         )
-        configured.update(selected_tools)
-    if wants_cursor:
-        # Establish workspace state for a Cursor-only run; when model agents were
-        # configured above the workspace is already set, so Cursor just rides along.
-        if not model_agent_names:
-            _configure_shared_workspace_states(
-                [_prompt_for_configuration(None)], tools=[], force_login=True
-            )
-        configured.add("cursor")
-    return configured
+    if "cursor" in to_bootstrap and not model_agents:
+        _configure_shared_workspace_states(
+            [_prompt_for_configuration(None)], tools=[], force_login=True
+        )
+    return scope
 
 
 def _configure_optional_setup(state: dict, tools: list[str]) -> None:
@@ -1369,15 +1365,10 @@ def skills_add(
             None if requested_skills is None else {s.split(".")[-1] for s in requested_skills}
         )
         if mcp:
-            if requested_agents:
-                scope = {a if a == "cursor" else normalize_tool(a) for a in requested_agents}
-                ready = set(configured_mcp_clients(load_state(), available_mcp_clients()))
-                to_bootstrap = sorted(scope - ready)
-                if to_bootstrap:
-                    _configure_agents_for_mcp(to_bootstrap)
-                add_skills_command(locations, agents=scope)
-            else:
-                add_skills_command(locations)
+            scope = (
+                _configure_agents_for_mcp(sorted(requested_agents)) if requested_agents else None
+            )
+            add_skills_command(locations, agents=scope)
         else:
             configure_skills_download_command(locations, path=path, skills=selected_skills)
     except (RuntimeError, ValueError) as exc:

@@ -133,7 +133,7 @@ class TestManagedFileLifecycle:
 
         monkeypatch.setattr(managed_files, "_sudo_replace", deny_write)
 
-        with pytest.raises(RuntimeError, match="could not update"):
+        with pytest.raises(managed_files.ManagedFileWriteUnavailable, match="could not update"):
             managed_files.reconcile_managed_file(
                 path,
                 '{"ucode": true}\n',

@@ -10,6 +10,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from ucode import managed_files
 from ucode.agents import LaunchOptions, claude
 from ucode.smart_routing import claude_routing, v2
 from ucode.state import MANAGED_OVERLAY_KEY
@@ -960,6 +961,59 @@ class TestWriteToolConfigManagedSettings:
             claude.write_tool_config(state, "databricks-claude-sonnet-4")
 
         assert managed_writes == []
+
+    def test_sudo_failure_uses_local_settings_when_managed_file_is_compatible(self, monkeypatch):
+        private_writes: list = []
+        managed_writes: list = []
+        warnings: list[str] = []
+        verified: list[dict] = []
+        self._patch(monkeypatch, private_writes, managed_writes)
+
+        def deny_managed_write(*args, **kwargs):
+            raise managed_files.ManagedFileWriteUnavailable("sudo denied")
+
+        monkeypatch.setattr(
+            claude,
+            "reconcile_managed_file",
+            deny_managed_write,
+        )
+        monkeypatch.setattr(claude, "print_warning", warnings.append)
+        monkeypatch.setattr(
+            claude,
+            "mark_managed_file_verified",
+            lambda *args, **kwargs: verified.append(kwargs),
+        )
+
+        claude.write_tool_config(
+            {"workspace": WS, "codex_models": []}, "databricks-claude-sonnet-4"
+        )
+
+        assert private_writes
+        assert managed_writes == []
+        assert "continuing with local settings" in warnings[0]
+        assert verified == [{"scope": "local-compatible"}]
+
+    def test_sudo_failure_remains_fatal_when_managed_file_conflicts(self, monkeypatch):
+        private_writes: list = []
+        managed_writes: list = []
+        existing = {
+            str(FAKE_MANAGED_PATH): {"env": {"ANTHROPIC_BASE_URL": "https://other.example.com"}}
+        }
+        self._patch(monkeypatch, private_writes, managed_writes, existing)
+
+        def deny_managed_write(*args, **kwargs):
+            raise managed_files.ManagedFileWriteUnavailable("sudo denied")
+
+        monkeypatch.setattr(
+            claude,
+            "reconcile_managed_file",
+            deny_managed_write,
+        )
+
+        with pytest.raises(managed_files.ManagedFileWriteUnavailable, match="sudo denied"):
+            claude.write_tool_config(
+                {"workspace": WS, "codex_models": []}, "databricks-claude-sonnet-4"
+            )
 
 
 class TestRegisterWebSearchMcp:

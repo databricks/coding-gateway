@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from ucode import managed_files
 from ucode.agents import LaunchOptions, codex
 from ucode.config_io import read_toml_safe
 from ucode.smart_routing import codex_routing
@@ -732,3 +733,48 @@ class TestCodexManagedConfig:
             codex.write_tool_config({"workspace": WS, "codex_models": ["gpt-5"]})
 
         assert managed_path.read_text(encoding="utf-8") == "[invalid"
+
+    def test_sudo_failure_uses_local_config_when_managed_config_is_compatible(
+        self, tmp_path, monkeypatch
+    ):
+        config_path, _ = self._patch(tmp_path, monkeypatch)
+        warnings: list[str] = []
+        verified: list[dict] = []
+
+        def deny_managed_write(*args, **kwargs):
+            raise managed_files.ManagedFileWriteUnavailable("sudo denied")
+
+        monkeypatch.setattr(
+            codex,
+            "reconcile_managed_file",
+            deny_managed_write,
+        )
+        monkeypatch.setattr(codex, "print_warning_err", warnings.append)
+        monkeypatch.setattr(
+            codex,
+            "mark_managed_file_verified",
+            lambda *args, **kwargs: verified.append(kwargs),
+        )
+
+        codex.write_tool_config({"workspace": WS, "codex_models": ["gpt-5"]})
+
+        assert config_path.exists()
+        assert "continuing with local settings" in warnings[0]
+        assert verified == [{"scope": "local-compatible"}]
+
+    def test_sudo_failure_remains_fatal_when_managed_config_conflicts(self, tmp_path, monkeypatch):
+        _, managed_path = self._patch(tmp_path, monkeypatch)
+        managed_path.parent.mkdir(parents=True, exist_ok=True)
+        managed_path.write_text('model_provider = "enterprise"\n', encoding="utf-8")
+
+        def deny_managed_write(*args, **kwargs):
+            raise managed_files.ManagedFileWriteUnavailable("sudo denied")
+
+        monkeypatch.setattr(
+            codex,
+            "reconcile_managed_file",
+            deny_managed_write,
+        )
+
+        with pytest.raises(managed_files.ManagedFileWriteUnavailable, match="sudo denied"):
+            codex.write_tool_config({"workspace": WS, "codex_models": ["gpt-5"]})

@@ -459,6 +459,25 @@ class TestSubcommandRouting:
         assert "ENABLE_SMART_ROUTING_V2" not in os.environ
         assert mock_launch.call_args.args[1].args == []
 
+    @pytest.mark.parametrize("tool, subcommand", [("codex", "app"), ("claude", "update")])
+    def test_native_subcommand_suppresses_inherited_smart_routing(
+        self, monkeypatch, tool, subcommand
+    ):
+        monkeypatch.setenv("ENABLE_SMART_ROUTING_V2", "1")
+        observed = []
+
+        with patch(
+            "ucode.cli._launch_tool",
+            side_effect=lambda *_args, **_kwargs: observed.append(
+                os.environ.get("ENABLE_SMART_ROUTING_V2")
+            ),
+        ):
+            result = runner.invoke(app, [tool, subcommand])
+
+        assert result.exit_code == 0, result.output
+        assert observed == [None]
+        assert os.environ["ENABLE_SMART_ROUTING_V2"] == "1"
+
     def test_claude_enable_smart_routing_forwards_positional_prompt_to_v2(self):
         captured = []
 

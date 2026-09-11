@@ -1747,6 +1747,26 @@ def _smart_routing_v2_flag(enabled: bool) -> Iterator[None]:
             os.environ[smart_routing_v2.ENV_VAR] = previous
 
 
+@contextmanager
+def _disable_smart_routing_for_subcommand(tool: str, ctx: Any) -> Iterator[None]:
+    """Keep native agent subcommands out of every smart-routing path.
+
+    The environment flag is also consulted during bootstrap/version checks,
+    before the final launch options are built. Native positional subcommands
+    must therefore suppress the flag for the whole ucode launch flow. An
+    explicit prompt after `--` remains eligible for routing.
+    """
+    if _smart_routing_launch_shape(tool, ctx.args, _has_explicit_prompt(ctx)):
+        yield
+        return
+    previous = os.environ.pop(smart_routing_v2.ENV_VAR, None)
+    try:
+        yield
+    finally:
+        if previous is not None:
+            os.environ[smart_routing_v2.ENV_VAR] = previous
+
+
 def _migrate_legacy_smart_routing(state: dict) -> dict:
     """Remove the former persisted opt-in and its permanent routing hooks."""
     if smart_routing_v2.LEGACY_STATE_KEY not in state:
@@ -1925,6 +1945,11 @@ def _should_launch_smart_routing(
 ) -> bool:
     if model is not None or has_explicit_model_arg(tool_args):
         return False
+    return _smart_routing_launch_shape(tool, tool_args, explicit_prompt)
+
+
+def _smart_routing_launch_shape(tool: str, tool_args: list[str], explicit_prompt: bool) -> bool:
+    """Whether the forwarded arguments represent an interactive launch."""
     if not tool_args or explicit_prompt:
         return True
     return tool == "claude" and tool_args[0].startswith("-")
@@ -2493,15 +2518,16 @@ def codex_cmd(
         print_success("Codex smart routing disabled; ug routing hooks removed")
         return
     with _smart_routing_v2_flag(enable_smart_routing_flag):
-        _launch_tool(
-            "codex",
-            ctx,
-            provider=provider,
-            refresh=refresh,
-            skip_preflight=skip_preflight,
-            workspace_url=workspace,
-            custom_oauth=custom_oauth,
-        )
+        with _disable_smart_routing_for_subcommand("codex", ctx):
+            _launch_tool(
+                "codex",
+                ctx,
+                provider=provider,
+                refresh=refresh,
+                skip_preflight=skip_preflight,
+                workspace_url=workspace,
+                custom_oauth=custom_oauth,
+            )
 
 
 @app.command(
@@ -2594,16 +2620,17 @@ def claude_cmd(
     if enable_model_discovery:
         os.environ[claude_agent.GATEWAY_MODEL_DISCOVERY_ENV_VAR] = "1"
     with _smart_routing_v2_flag(enable_smart_routing_flag):
-        _launch_tool(
-            "claude",
-            ctx,
-            provider=provider,
-            model=model,
-            refresh=refresh,
-            skip_preflight=skip_preflight,
-            workspace_url=workspace,
-            custom_oauth=custom_oauth,
-        )
+        with _disable_smart_routing_for_subcommand("claude", ctx):
+            _launch_tool(
+                "claude",
+                ctx,
+                provider=provider,
+                model=model,
+                refresh=refresh,
+                skip_preflight=skip_preflight,
+                workspace_url=workspace,
+                custom_oauth=custom_oauth,
+            )
 
 
 @app.command("gemini", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})

@@ -2124,7 +2124,7 @@ def _launch_tool(
                     # Resolve against a curated allowlist so the forwarded id is one the gateway
                     # allows; an allow_all relay declares none, so forward as-is.
                     relayed_forward_model = (
-                        resolve_provider_launch_model(model, provider_models, always_select=True)
+                        resolve_provider_launch_model(model, provider_models)
                         if provider_models
                         else model
                     )

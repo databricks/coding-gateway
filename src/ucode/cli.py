@@ -28,6 +28,8 @@ from ucode.agents import (
     explicit_model_arg_value,
     install_databricks_ai_tools_for_agents,
     install_tool_binary,
+    normalize_agent,
+    normalize_agents,
     normalize_tool,
     provider_permission_error,
     resolve_gemini_provider_model,
@@ -1133,7 +1135,7 @@ def _configure_agents_for_mcp(
     Cursor is MCP-only, so it just needs workspace state established and rides
     along via MCP_ONLY_CLIENTS. Interactive — prompts for the workspace URL on
     first run."""
-    scope = {a if a == "cursor" else normalize_tool(a) for a in requested}
+    scope = {normalize_agent(a) for a in requested}
     ready = set(configured_mcp_clients(load_state(), available_mcp_clients()))
     to_bootstrap = scope - ready
     model_agents = sorted(a for a in to_bootstrap if a != "cursor")
@@ -1201,11 +1203,7 @@ def mcp_add(
     (and, if needed, set up) specific agents.
     """
     selected = None if services is None else {s.strip() for s in services.split(",") if s.strip()}
-    requested_agents = (
-        None
-        if agents is None
-        else ({a.strip().lower() for a in agents.split(",") if a.strip()} or None)
-    )
+    requested_agents = normalize_agents(agents)
     try:
         scope = _configure_agents_for_mcp(sorted(requested_agents)) if requested_agents else None
         add_mcp_command(location=location, services=selected, agents=scope)
@@ -1235,11 +1233,7 @@ def mcp_remove(
     Interactive: shows the servers you currently have configured and unregisters the
     ones you select. Needs no Databricks login.
     """
-    requested_agents = (
-        None
-        if agents is None
-        else ({a.strip().lower() for a in agents.split(",") if a.strip()} or None)
-    )
+    requested_agents = normalize_agents(agents)
     try:
         remove_mcp_command(agents=requested_agents)
     except RuntimeError as exc:
@@ -1315,11 +1309,7 @@ def skills_add(
         requested_skills = (
             None if skills is None else {s.strip() for s in skills.split(",") if s.strip()}
         )
-        requested_agents = (
-            None
-            if agents is None
-            else ({agent.strip().lower() for agent in agents.split(",") if agent.strip()} or None)
-        )
+        requested_agents = normalize_agents(agents)
         if mcp and path is not None:
             raise RuntimeError("--path is not supported when using --mcp")
         if mcp and requested_skills is not None:
@@ -1421,11 +1411,7 @@ def skills_remove(
                 "Removing downloaded skills is not supported yet. Pass --mcp to remove "
                 "schemas from the skills MCP connection."
             )
-        requested_agents = (
-            None
-            if agents is None
-            else ({agent.strip().lower() for agent in agents.split(",") if agent.strip()} or None)
-        )
+        requested_agents = normalize_agents(agents)
         remove_skills_command(agents=requested_agents)
     except RuntimeError as exc:
         print_err(str(exc))

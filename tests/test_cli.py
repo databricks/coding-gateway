@@ -1063,6 +1063,20 @@ class TestMcpSubcommands:
         assert result.exit_code == 0
         assert "web-search" in result.output
 
+    def test_mcp_remove_forwards_agent_scope(self):
+        with patch("ucode.cli.remove_mcp_command") as remove:
+            result = runner.invoke(app, ["mcp", "remove", "--agents", "claude, codex"])
+
+        assert result.exit_code == 0, result.output
+        remove.assert_called_once_with(agents={"claude", "codex"})
+
+    def test_mcp_remove_normalizes_agent_aliases(self):
+        with patch("ucode.cli.remove_mcp_command") as remove:
+            result = runner.invoke(app, ["mcp", "remove", "--agents", "claude-code, gemini-cli"])
+
+        assert result.exit_code == 0, result.output
+        remove.assert_called_once_with(agents={"claude", "gemini"})
+
 
 class TestAuthTokenCommand:
     """`ucode auth-token` is the cross-platform apiKeyHelper (#116)."""
@@ -1620,6 +1634,17 @@ class TestSkillsRemoveCommand:
 
         assert result.exit_code == 0, result.output
         remove.assert_called_once_with(agents={"claude", "codex"})
+
+    def test_mcp_remove_normalizes_agent_aliases(self):
+        # `skill add` resolves aliases like `claude-code`; removal must too, or a
+        # user who added with an alias can't remove with the same name.
+        with patch("ucode.cli.remove_skills_command") as remove:
+            result = runner.invoke(
+                app, ["skill", "remove", "--mcp", "--agents", "claude-code, gemini-cli"]
+            )
+
+        assert result.exit_code == 0, result.output
+        remove.assert_called_once_with(agents={"claude", "gemini"})
 
 
 class TestManagedSkillsOnLaunch:

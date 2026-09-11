@@ -424,10 +424,13 @@ def configure_tool(
     route_root_model: str | None = None,
     custom_model: str | None = None,
     coding_agent_config_defaults: dict[str, str] | None = None,
+    parent_schema: str | None = None,
 ) -> dict:
     result: dict | tuple[dict, str]
     if tool == "codex":
-        result = codex.write_tool_config(state, model, provider=provider)
+        result = codex.write_tool_config(
+            state, model, provider=provider, parent_schema=parent_schema
+        )
     elif tool == "claude":
         # A Model Provider Service routes by header and pins no Databricks
         # model, so the usual "model required" guard doesn't apply to claude.
@@ -442,6 +445,7 @@ def configure_tool(
             route_root_model=route_root_model,
             custom_model=custom_model,
             coding_agent_config_defaults=coding_agent_config_defaults,
+            parent_schema=parent_schema,
         )
     else:
         # Every tool in this branch needs a model — including gemini under a provider,

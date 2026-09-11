@@ -16,7 +16,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,6 +25,22 @@ ROUTER_NAME = "task_v2"
 ROUTER_NAME_ENV_VAR = "SMART_ROUTER_NAME"
 ROUTING_PATH = "/ai-gateway/routing/v1/routes:select"
 REQUEST_TIMEOUT_S = 30.0
+ROUTE_FORWARD_HEADER_NAMES = frozenset(
+    {
+        "databricks-ai-gateway-request-tags",
+        "user-agent",
+        "x-databricks-traffic-id",
+        "x-databricks-use-coding-agent-mode",
+    }
+)
+SENSITIVE_HEADER_NAMES = frozenset(
+    {
+        "authorization",
+        "cookie",
+        "proxy-authorization",
+        "x-databricks-ai-gateway-token",
+    }
+)
 SUBAGENT_ROUTING_DISCLAIMER = (
     "Spawned subagents are routed independently based on their own complexity."
 )
@@ -104,6 +120,81 @@ def configured_router_name() -> str:
     return os.environ.get(ROUTER_NAME_ENV_VAR, "").strip() or ROUTER_NAME
 
 
+def route_request_body(
+    task: str,
+    route_options: Iterable[tuple[str, str | None]],
+    *,
+    router_name: str,
+) -> dict[str, Any]:
+    """Return the JSON body sent to ``routes:select``."""
+    return {
+        "route_options": [{"model": model, "harness": harness} for model, harness in route_options],
+        "task": {"prompt": task},
+        "route_selector": {"router_name": router_name},
+    }
+
+
+def route_forward_headers_from_lines(headers: object) -> dict[str, str]:
+    """Parse newline-delimited gateway headers to forward to ``routes:select``."""
+    if not isinstance(headers, str):
+        return {}
+    forwarded: dict[str, str] = {}
+    for line in headers.splitlines():
+        name, separator, value = line.partition(":")
+        normalized = name.strip().casefold()
+        if not separator or normalized not in ROUTE_FORWARD_HEADER_NAMES:
+            continue
+        clean_name = name.strip()
+        clean_value = value.strip()
+        if clean_name and clean_value:
+            forwarded[clean_name] = clean_value
+    return forwarded
+
+
+def route_request_headers(
+    token: str,
+    extra_headers: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Return HTTP headers for ``routes:select`` without allowing auth overrides."""
+    headers: dict[str, str] = {}
+    for name, value in (extra_headers or {}).items():
+        normalized = name.strip().casefold()
+        if normalized not in ROUTE_FORWARD_HEADER_NAMES:
+            continue
+        clean_name = name.strip()
+        clean_value = value.strip()
+        if clean_name and clean_value:
+            headers[clean_name] = clean_value
+    headers["Authorization"] = f"Bearer {token}"
+    headers["Content-Type"] = "application/json"
+    return headers
+
+
+def log_route_request(
+    workspace: str,
+    body: dict[str, Any],
+    *,
+    headers: Mapping[str, str] | None = None,
+    log: Callable[[str], None] | None = None,
+    request_log_path: Path | None = None,
+) -> None:
+    """Record an outgoing route-selection request without credentials."""
+    url = workspace.rstrip("/") + ROUTING_PATH
+    if log is not None:
+        log(f"[ROUTE] request POST {url}: {json.dumps(body, separators=(',', ':'))}")
+    if request_log_path is not None:
+        _append_jsonl(
+            request_log_path,
+            {
+                "at": time.time(),
+                "method": "POST",
+                "url": url,
+                "headers": _redacted_headers(headers or {}),
+                "body": body,
+            },
+        )
+
+
 def select_route(
     workspace: str,
     token: str,
@@ -113,6 +204,7 @@ def select_route(
     *,
     router_name: str,
     timeout: float = REQUEST_TIMEOUT_S,
+    extra_headers: Mapping[str, str] | None = None,
 ) -> tuple[RoutingDecision | None, str | None]:
     """POST one ``routes:select`` request and resolve the router's pick.
 
@@ -122,18 +214,11 @@ def select_route(
     None when the arm is unservable. Returns ``(decision, error)``; a failed
     call yields ``(None, reason)`` so callers can fail open.
     """
-    body = {
-        "route_options": [{"model": model, "harness": harness} for model, harness in route_options],
-        "task": {"prompt": task},
-        "route_selector": {"router_name": router_name},
-    }
+    body = route_request_body(task, route_options, router_name=router_name)
     request = urllib.request.Request(
         workspace.rstrip("/") + ROUTING_PATH,
         data=json.dumps(body).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        },
+        headers=route_request_headers(token, extra_headers),
         method="POST",
     )
     try:
@@ -340,6 +425,13 @@ def _selected_model(payload: Any) -> str | None:
         return None
     model = option.get("model")
     return model if isinstance(model, str) and model else None
+
+
+def _redacted_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    redacted: dict[str, str] = {}
+    for name, value in headers.items():
+        redacted[name] = "[REDACTED]" if name.strip().casefold() in SENSITIVE_HEADER_NAMES else value
+    return redacted
 
 
 def _pending_decision(

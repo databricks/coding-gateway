@@ -38,6 +38,7 @@ ENV_VAR = "ENABLE_SMART_ROUTING_V2"
 LEGACY_STATE_KEY = "smart_routing_enabled"
 
 CODEX_INTERPOSER_LOG = APP_DIR / "codex-v2-interposer.log"
+CODEX_CUSTOM_HEADERS_ENV_VAR = "CODEX_CUSTOM_HEADERS"
 
 CLAUDE_TARGET_MODEL = "system.ai.claude-sonnet-4-6[1m]"  # TODO(lilly): replace with smart router.
 CLAUDE_PTY_LOG = APP_DIR / "claude-v2-pty.log"
@@ -239,6 +240,9 @@ def _request_claude_routing_decision(
     token: str,
     prompt: str,
     model_ids: list[str],
+    *,
+    log: Callable[[str], None] | None = None,
+    extra_headers: dict[str, str] | None = None,
 ) -> tuple[routing.RoutingDecision | None, str | None]:
     available: dict[str, str] = {}
     for model in _canonical_claude_models(model_ids):
@@ -246,14 +250,28 @@ def _request_claude_routing_decision(
     if not available:
         return None, "Anthropic models endpoint returned no Claude models"
     route_options = [(model, "claude") for model in available]
+    router_name = routing.configured_router_name()
+    headers = routing.route_request_headers(token, extra_headers)
+    routing.log_route_request(
+        workspace,
+        routing.route_request_body(prompt, route_options, router_name=router_name),
+        headers=headers,
+        log=log,
+        request_log_path=claude_routing.request_log_path(),
+    )
+    select_kwargs: dict[str, object] = {
+        "router_name": router_name,
+        "timeout": CLAUDE_ROUTE_SELECTION_TIMEOUT_S,
+    }
+    if extra_headers:
+        select_kwargs["extra_headers"] = extra_headers
     return routing.select_route(
         workspace,
         token,
         prompt,
         route_options,
         lambda selected: available.get(_claude_router_model_id(selected)),
-        router_name=routing.configured_router_name(),
-        timeout=CLAUDE_ROUTE_SELECTION_TIMEOUT_S,
+        **select_kwargs,
     )
 
 
@@ -262,6 +280,9 @@ def _route_claude_prompt(
     token: str,
     prompt: str,
     model_ids: list[str] | None = None,
+    *,
+    log: Callable[[str], None] | None = None,
+    extra_headers: dict[str, str] | None = None,
 ) -> routing.RoutingDecision:
     workspace = state.get("workspace")
     if not isinstance(workspace, str):
@@ -273,7 +294,14 @@ def _route_claude_prompt(
             raise RuntimeError(
                 discovery_error or "Anthropic models endpoint returned no Claude models"
             )
-    decision, error = _request_claude_routing_decision(workspace, token, prompt, model_ids)
+    decision, error = _request_claude_routing_decision(
+        workspace,
+        token,
+        prompt,
+        model_ids,
+        log=log,
+        extra_headers=extra_headers,
+    )
     if decision is None:
         raise RuntimeError(error or "router returned no Claude model selection")
     return decision
@@ -286,13 +314,21 @@ def route_claude_pre_tool_use(
     token: str,
     available_models: list[str],
     audit_decision: bool = False,
+    extra_headers: dict[str, str] | None = None,
 ) -> dict | None:
     """Route a Claude Agent call through a transient exact-model agent definition."""
     route = routing.resolve_spawn_route(
         payload,
         is_spawn_agent=claude_routing.is_spawn_agent_tool,
         decision_fn=lambda task: _request_claude_routing_decision(
-            workspace, token, task, available_models
+            workspace,
+            token,
+            task,
+            available_models,
+            extra_headers=extra_headers
+            or routing.route_forward_headers_from_lines(
+                os.environ.get("ANTHROPIC_CUSTOM_HEADERS")
+            ),
         ),
         default_task_label="Claude Code subagent task",
         model_id_mapper=lambda model: model,
@@ -416,6 +452,10 @@ def launch_claude(
         raise RuntimeError("Claude settings 'env' must be an object for smart routing.")
     env.pop("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", None)
     env[FIRST_PROMPT_SOCKET_ENV] = str(socket_path)
+    route_headers = {
+        **routing.route_forward_headers_from_lines(os.environ.get("ANTHROPIC_CUSTOM_HEADERS")),
+        **routing.route_forward_headers_from_lines(env.get("ANTHROPIC_CUSTOM_HEADERS")),
+    }
     model_overrides = settings.setdefault("modelOverrides", {})
     if not isinstance(model_overrides, dict):
         raise RuntimeError("Claude settings 'modelOverrides' must be an object for smart routing.")
@@ -433,8 +473,23 @@ def launch_claude(
 
     model_setting = _ClaudeModelSettingGuard(user_settings_path)
 
+    def log_route_request(message: str) -> None:
+        try:
+            CLAUDE_PTY_LOG.parent.mkdir(parents=True, exist_ok=True)
+            with open(CLAUDE_PTY_LOG, "a", encoding="utf-8") as handle:
+                handle.write(f"{time.strftime('%H:%M:%S')} {message}\n")
+        except OSError:
+            pass
+
     def route_prompt(prompt: str) -> claude_pty.FirstPromptRoute:
-        decision = _route_claude_prompt(state, token, prompt, model_ids)
+        decision = _route_claude_prompt(
+            state,
+            token,
+            prompt,
+            model_ids,
+            log=log_route_request,
+            extra_headers=route_headers,
+        )
         return claude_pty.FirstPromptRoute(
             model=model_name(_unwrapped_claude_model_id(decision.model)),
             display_model=catalog.model_id_to_display_name.get(decision.model, decision.model),
@@ -486,6 +541,43 @@ def _v2_pre_tool_use_hooks(state: dict, available_models: list[str]) -> list[dic
     )
 
 
+def _codex_route_headers(overlay: dict) -> dict[str, str]:
+    providers = overlay.get("model_providers")
+    if not isinstance(providers, dict):
+        return {}
+    provider = providers.get("ucode-databricks")
+    if not isinstance(provider, dict):
+        return {}
+    headers = provider.get("http_headers")
+    if not isinstance(headers, dict):
+        return {}
+    return {
+        str(name): str(value)
+        for name, value in headers.items()
+        if isinstance(name, str) and isinstance(value, str)
+    }
+
+
+def _apply_codex_custom_headers(overlay: dict) -> dict[str, str]:
+    """Add shell-provided gateway headers to the Codex provider overlay."""
+    custom_headers = routing.route_forward_headers_from_lines(
+        os.environ.get(CODEX_CUSTOM_HEADERS_ENV_VAR)
+    )
+    if not custom_headers:
+        return overlay
+    providers = overlay.get("model_providers")
+    if not isinstance(providers, dict):
+        return overlay
+    provider = providers.get("ucode-databricks")
+    if not isinstance(provider, dict):
+        return overlay
+    headers = provider.setdefault("http_headers", {})
+    if not isinstance(headers, dict):
+        return overlay
+    headers.update(custom_headers)
+    return overlay
+
+
 def launch_codex(
     state: dict,
     tool_args: list[str],
@@ -518,6 +610,8 @@ def launch_codex(
         state.get("profile"),
         use_pat=bool(state.get("use_pat")),
     )
+    _apply_codex_custom_headers(overlay)
+    route_headers = _codex_route_headers(overlay)
     overlay["hooks"] = {
         "PreToolUse": _v2_pre_tool_use_hooks(state, available_models),
     }
@@ -546,6 +640,7 @@ def launch_codex(
             available_models=available_models,
             workspace=workspace,
             token_provider=lambda: get_databricks_token(workspace, profile),
+            route_headers=route_headers,
             switch_message_fn=format_routing_notice,
             log_path=CODEX_INTERPOSER_LOG,
         )

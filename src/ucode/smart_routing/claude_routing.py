@@ -9,12 +9,17 @@ scenario REQUIRES its full menu — both ``claude-opus-4-8`` and
 
 from __future__ import annotations
 
+import os
+
 # Re-exported so tests can patch the shared ``urlopen`` seam via
 # ``claude_routing.urllib.request`` — the call lives in ``routing``, but Python
 # modules are singletons so patching this name patches the one call site.
 import urllib.request  # noqa: F401
+from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import Any
 
+from ucode import config_io
 from ucode.config_io import APP_DIR
 from ucode.smart_routing import routing
 from ucode.smart_routing.routing import RoutingDecision
@@ -29,8 +34,14 @@ SPAWN_AGENT_TOOL_NAMES = ("agent", "task")
 CANARY_PATH = APP_DIR / "claude-smart-routing-canary.json"
 AUDIT_PATH = APP_DIR / "claude-smart-routing-audit.jsonl"
 DECISIONS_PATH = APP_DIR / "claude-smart-routing-decisions.jsonl"
+REQUESTS_LOG_FILENAME = "claude-smart-routing-requests.jsonl"
 
 _normalize_model = routing.normalize_model
+
+
+def request_log_path() -> Path:
+    """Return the Claude Code smart-routing request log path."""
+    return config_io.APP_DIR / REQUESTS_LOG_FILENAME
 
 
 # Claude Code CLI options that consume a following value (from `claude --help`);
@@ -79,6 +90,8 @@ def request_routing_decision(
     available_models: list[str],
     *,
     timeout: float = REQUEST_TIMEOUT_S,
+    log: Callable[[str], None] | None = None,
+    extra_headers: Mapping[str, str] | None = None,
 ) -> tuple[RoutingDecision | None, str | None]:
     """Ask the router for a servable Claude model.
 
@@ -90,14 +103,26 @@ def request_routing_decision(
     if missing:
         return None, f"required Claude routing models are unavailable: {', '.join(missing)}"
 
+    route_options = [(arm, "claude") for arm in CLAUDE_ROUTE_ARMS]
+    router_name = routing.configured_router_name()
+    headers = routing.route_request_headers(token, extra_headers)
+    routing.log_route_request(
+        workspace,
+        routing.route_request_body(task, route_options, router_name=router_name),
+        headers=headers,
+        log=log,
+        request_log_path=request_log_path(),
+    )
+    select_kwargs: dict[str, Any] = {"router_name": router_name, "timeout": timeout}
+    if extra_headers:
+        select_kwargs["extra_headers"] = extra_headers
     return routing.select_route(
         workspace,
         token,
         task,
-        [(arm, "claude") for arm in CLAUDE_ROUTE_ARMS],
+        route_options,
         lambda raw_model: available.get(_normalize_model(raw_model)),
-        router_name=routing.configured_router_name(),
-        timeout=timeout,
+        **select_kwargs,
     )
 
 
@@ -109,6 +134,7 @@ def route_pre_tool_use(
     available_models: list[str],
     timeout: float = REQUEST_TIMEOUT_S,
     audit_decision: bool = False,
+    extra_headers: Mapping[str, str] | None = None,
 ) -> dict[str, Any] | None:
     """Route one Claude Code ``Agent`` (subagent-spawn) call, rewriting its model."""
     record = None
@@ -121,7 +147,15 @@ def route_pre_tool_use(
         payload,
         is_spawn_agent=is_spawn_agent_tool,
         decision_fn=lambda task: request_routing_decision(
-            workspace, token, task, available_models, timeout=timeout
+            workspace,
+            token,
+            task,
+            available_models,
+            timeout=timeout,
+            extra_headers=extra_headers
+            or routing.route_forward_headers_from_lines(
+                os.environ.get("ANTHROPIC_CUSTOM_HEADERS")
+            ),
         ),
         default_task_label="Claude Code subagent task",
         model_id_mapper=_claude_model_id,
@@ -148,7 +182,7 @@ def record_subagent_start(payload: dict[str, Any]) -> dict[str, Any]:
 
 def clear_routing_artifacts() -> None:
     """Remove ucode-owned routing canary and audit files."""
-    routing.clear_artifacts((CANARY_PATH, AUDIT_PATH, DECISIONS_PATH))
+    routing.clear_artifacts((CANARY_PATH, AUDIT_PATH, DECISIONS_PATH, request_log_path()))
 
 
 def _claude_model_id(model: str) -> str:

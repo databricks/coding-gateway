@@ -82,6 +82,83 @@ def test_routes_with_models_from_stored_state(monkeypatch):
     }
 
 
+def test_routes_select_request_is_logged(monkeypatch, tmp_path):
+    monkeypatch.delenv("SMART_ROUTER_NAME", raising=False)
+    monkeypatch.setattr(codex_routing.config_io, "APP_DIR", tmp_path)
+    logged = []
+
+    monkeypatch.setattr(
+        codex_routing.urllib.request,
+        "urlopen",
+        lambda request, timeout: _Response(
+            {"route_selection": [{"route_option": {"model": "gpt-5-6-sol"}}]}
+        ),
+    )
+
+    decision, error = codex_routing.request_routing_decision(
+        WS,
+        "secret-token",
+        "Fix the parser",
+        ["system.ai.gpt-5-6-sol"],
+        log=logged.append,
+    )
+
+    assert error is None
+    assert decision is not None
+    assert len(logged) == 1
+    assert logged[0].startswith(f"[ROUTE] request POST {WS}/ai-gateway/routing/v1/routes:select: ")
+    logged_body = json.loads(logged[0].split(": ", 1)[1])
+    record = json.loads((tmp_path / codex_routing.REQUESTS_LOG_FILENAME).read_text())
+    assert record["method"] == "POST"
+    assert record["url"] == f"{WS}/ai-gateway/routing/v1/routes:select"
+    assert logged_body == record["body"] == {
+        "route_options": [{"model": "gpt-5-6-sol", "harness": "codex"}],
+        "task": {"prompt": "Fix the parser"},
+        "route_selector": {"router_name": codex_routing.routing.ROUTER_NAME},
+    }
+    assert "secret-token" not in logged[0]
+    assert "secret-token" not in (tmp_path / codex_routing.REQUESTS_LOG_FILENAME).read_text()
+
+
+def test_routes_select_forwards_gateway_headers_without_auth_override(monkeypatch, tmp_path):
+    monkeypatch.setattr(codex_routing.config_io, "APP_DIR", tmp_path)
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        captured["headers"] = {key.casefold(): value for key, value in request.headers.items()}
+        return _Response({"route_selection": [{"route_option": {"model": "gpt-5-6-sol"}}]})
+
+    monkeypatch.setattr(codex_routing.urllib.request, "urlopen", fake_urlopen)
+
+    decision, error = codex_routing.request_routing_decision(
+        WS,
+        "real-token",
+        "Fix the parser",
+        ["system.ai.gpt-5-6-sol"],
+        extra_headers={
+            "x-databricks-traffic-id": "testenv://liteswap/arnav-r315-task-v3",
+            "Authorization": "Bearer wrong-token",
+            "X-Ignored": "no",
+        },
+    )
+
+    assert error is None
+    assert decision is not None
+    assert captured["headers"]["authorization"] == "Bearer real-token"
+    assert (
+        captured["headers"]["x-databricks-traffic-id"]
+        == "testenv://liteswap/arnav-r315-task-v3"
+    )
+    assert "x-ignored" not in captured["headers"]
+    record = json.loads((tmp_path / codex_routing.REQUESTS_LOG_FILENAME).read_text())
+    assert record["headers"]["Authorization"] == "[REDACTED]"
+    assert (
+        record["headers"]["x-databricks-traffic-id"]
+        == "testenv://liteswap/arnav-r315-task-v3"
+    )
+    assert "wrong-token" not in (tmp_path / codex_routing.REQUESTS_LOG_FILENAME).read_text()
+
+
 def test_router_name_can_be_overridden_with_environment_variable(monkeypatch):
     captured = {}
     monkeypatch.setenv("SMART_ROUTER_NAME", "  custom_router  ")

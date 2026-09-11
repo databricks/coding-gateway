@@ -7,16 +7,17 @@ detector, the Codex model-id translation, and the artifact paths.
 
 from __future__ import annotations
 
-import json
 import re
 
 # Re-exported so tests can patch the shared ``urlopen`` seam via
 # ``codex_routing.urllib.request`` — the actual call lives in ``routing``, but
 # Python modules are singletons so patching this name patches the one call site.
 import urllib.request  # noqa: F401
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import Any
 
+from ucode import config_io
 from ucode.config_io import APP_DIR
 from ucode.smart_routing import routing
 from ucode.smart_routing.routing import RoutingDecision
@@ -28,10 +29,16 @@ SPAWN_AGENT_TOOL_SUFFIX = "spawn_agent"
 CANARY_PATH = APP_DIR / "codex-smart-routing-canary.json"
 AUDIT_PATH = APP_DIR / "codex-smart-routing-audit.jsonl"
 DECISIONS_PATH = APP_DIR / "codex-smart-routing-decisions.jsonl"
+REQUESTS_LOG_FILENAME = "codex-smart-routing-requests.jsonl"
 
 _GPT_RE = re.compile(r"gpt-(\d+)(?:[.-](\d+))?(?:[.-](\d+))?(-.+|[a-z].*)?")
 
 _normalize_model = routing.normalize_model
+
+
+def request_log_path() -> Path:
+    """Return the Codex smart-routing request log path."""
+    return config_io.APP_DIR / REQUESTS_LOG_FILENAME
 
 
 def request_routing_decision(
@@ -42,6 +49,7 @@ def request_routing_decision(
     *,
     timeout: float = REQUEST_TIMEOUT_S,
     log: Callable[[str], None] | None = None,
+    extra_headers: Mapping[str, str] | None = None,
 ) -> tuple[RoutingDecision | None, str | None]:
     """Ask the router for a servable Codex model."""
     available = {_normalize_model(model): model for model in available_models}
@@ -49,24 +57,24 @@ def request_routing_decision(
     if not route_options:
         return None, "no cached model services are available"
     router_name = routing.configured_router_name()
-    if log is not None:
-        payload = {
-            "route_options": [
-                {"model": model, "harness": harness} for model, harness in route_options
-            ],
-            "task": {"prompt": task},
-            "route_selector": {"router_name": router_name},
-        }
-        url = workspace.rstrip("/") + ROUTING_PATH
-        log(f"[ROUTE] request POST {url}: {json.dumps(payload, separators=(',', ':'))}")
+    headers = routing.route_request_headers(token, extra_headers)
+    routing.log_route_request(
+        workspace,
+        routing.route_request_body(task, route_options, router_name=router_name),
+        headers=headers,
+        log=log,
+        request_log_path=request_log_path(),
+    )
+    select_kwargs: dict[str, Any] = {"router_name": router_name, "timeout": timeout}
+    if extra_headers:
+        select_kwargs["extra_headers"] = extra_headers
     return routing.select_route(
         workspace,
         token,
         task,
         route_options,
         lambda raw_model: available.get(_normalize_model(raw_model)),
-        router_name=router_name,
-        timeout=timeout,
+        **select_kwargs,
     )
 
 
@@ -84,6 +92,7 @@ def route_pre_tool_use(
     available_models: list[str],
     timeout: float = REQUEST_TIMEOUT_S,
     audit_decision: bool = False,
+    extra_headers: Mapping[str, str] | None = None,
 ) -> dict[str, Any] | None:
     """Route one Codex ``spawn_agent`` call and rewrite its model."""
     record = None
@@ -96,7 +105,12 @@ def route_pre_tool_use(
         payload,
         is_spawn_agent=is_spawn_agent_tool,
         decision_fn=lambda task: request_routing_decision(
-            workspace, token, task, available_models, timeout=timeout
+            workspace,
+            token,
+            task,
+            available_models,
+            timeout=timeout,
+            extra_headers=extra_headers,
         ),
         default_task_label="Codex subagent task",
         model_id_mapper=codex_model_id,
@@ -124,7 +138,7 @@ def record_subagent_start(payload: dict[str, Any]) -> dict[str, Any]:
 
 def clear_routing_artifacts() -> None:
     """Remove ucode-owned routing canary and audit files."""
-    routing.clear_artifacts((CANARY_PATH, AUDIT_PATH, DECISIONS_PATH))
+    routing.clear_artifacts((CANARY_PATH, AUDIT_PATH, DECISIONS_PATH, request_log_path()))
 
 
 def _parse_gpt(model: str) -> tuple[int, int, int, str] | None:

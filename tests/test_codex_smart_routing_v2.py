@@ -167,6 +167,13 @@ class TestLaunchCodex:
 
         monkeypatch.setattr(codex_interposer, "start_interposer_thread", start_interposer)
 
+        def render_overlay(*args, **kwargs):
+            overlay = codex.render_overlay(*args, **kwargs)
+            overlay["model_providers"]["ucode-databricks"]["http_headers"][
+                "x-databricks-traffic-id"
+            ] = "testenv://liteswap/arnav-r315-task-v3"
+            return overlay
+
         with pytest.raises(SystemExit) as exc:
             v2.launch_codex(
                 {
@@ -178,7 +185,7 @@ class TestLaunchCodex:
                 ["--search"],
                 binary="codex",
                 start_model="gpt-start",
-                render_overlay=codex.render_overlay,
+                render_overlay=render_overlay,
             )
 
         assert exc.value.code == 7
@@ -221,6 +228,9 @@ class TestLaunchCodex:
             "system.ai.glm-5-2",
         ]
         assert interposer_args["kwargs"]["workspace"] == WS
+        assert interposer_args["kwargs"]["route_headers"]["x-databricks-traffic-id"] == (
+            "testenv://liteswap/arnav-r315-task-v3"
+        )
         assert token_calls == [(WS, "myprof")]
         assert interposer_args["kwargs"]["token_provider"]() == "token-2"
         assert token_calls == [(WS, "myprof"), (WS, "myprof")]

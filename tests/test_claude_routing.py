@@ -70,6 +70,97 @@ def test_routes_with_default_claude_menu(monkeypatch):
     }
 
 
+def test_routes_select_request_is_logged(monkeypatch, tmp_path):
+    monkeypatch.delenv("SMART_ROUTER_NAME", raising=False)
+    monkeypatch.setattr(claude_routing.config_io, "APP_DIR", tmp_path)
+    logged = []
+
+    monkeypatch.setattr(
+        claude_routing.urllib.request,
+        "urlopen",
+        lambda request, timeout: _Response(
+            {"route_selection": [{"route_option": {"model": "claude-sonnet-5"}}]}
+        ),
+    )
+
+    decision, error = claude_routing.request_routing_decision(
+        WS,
+        "secret-token",
+        "Map the codebase",
+        ["system.ai.claude-opus-4-8", "system.ai.claude-sonnet-5"],
+        log=logged.append,
+    )
+
+    assert error is None
+    assert decision is not None
+    assert len(logged) == 1
+    assert logged[0].startswith(f"[ROUTE] request POST {WS}/ai-gateway/routing/v1/routes:select: ")
+    logged_body = json.loads(logged[0].split(": ", 1)[1])
+    record = json.loads((tmp_path / claude_routing.REQUESTS_LOG_FILENAME).read_text())
+    assert record["method"] == "POST"
+    assert record["url"] == f"{WS}/ai-gateway/routing/v1/routes:select"
+    assert logged_body == record["body"] == {
+        "route_options": [
+            {"model": "claude-opus-4-8", "harness": "claude"},
+            {"model": "claude-sonnet-5", "harness": "claude"},
+        ],
+        "task": {"prompt": "Map the codebase"},
+        "route_selector": {"router_name": claude_routing.ROUTER_NAME},
+    }
+    assert "secret-token" not in logged[0]
+    assert "secret-token" not in (tmp_path / claude_routing.REQUESTS_LOG_FILENAME).read_text()
+
+
+def test_routes_select_forwards_gateway_headers_without_auth_override(monkeypatch, tmp_path):
+    monkeypatch.setattr(claude_routing.config_io, "APP_DIR", tmp_path)
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        captured["headers"] = {key.casefold(): value for key, value in request.headers.items()}
+        return _Response({"route_selection": [{"route_option": {"model": "claude-sonnet-5"}}]})
+
+    monkeypatch.setattr(claude_routing.urllib.request, "urlopen", fake_urlopen)
+
+    decision, error = claude_routing.request_routing_decision(
+        WS,
+        "real-token",
+        "Map the codebase",
+        ["system.ai.claude-opus-4-8", "system.ai.claude-sonnet-5"],
+        extra_headers=claude_routing.routing.route_forward_headers_from_lines(
+            "\n".join(
+                [
+                    "x-databricks-traffic-id: testenv://liteswap/arnav-r315-task-v3",
+                    "x-databricks-use-coding-agent-mode: true",
+                    'Databricks-Ai-Gateway-Request-Tags: {"source":"isaac-cli"}',
+                    "Authorization: Bearer wrong-token",
+                    "X-Ignored: no",
+                ]
+            )
+        ),
+    )
+
+    assert error is None
+    assert decision is not None
+    assert captured["headers"]["authorization"] == "Bearer real-token"
+    assert (
+        captured["headers"]["x-databricks-traffic-id"]
+        == "testenv://liteswap/arnav-r315-task-v3"
+    )
+    assert captured["headers"]["x-databricks-use-coding-agent-mode"] == "true"
+    assert (
+        captured["headers"]["databricks-ai-gateway-request-tags"]
+        == '{"source":"isaac-cli"}'
+    )
+    assert "x-ignored" not in captured["headers"]
+    record = json.loads((tmp_path / claude_routing.REQUESTS_LOG_FILENAME).read_text())
+    assert record["headers"]["Authorization"] == "[REDACTED]"
+    assert (
+        record["headers"]["x-databricks-traffic-id"]
+        == "testenv://liteswap/arnav-r315-task-v3"
+    )
+    assert "wrong-token" not in (tmp_path / claude_routing.REQUESTS_LOG_FILENAME).read_text()
+
+
 def test_missing_arm_short_circuits_without_calling_router(monkeypatch):
     def fail(*args, **kwargs):
         raise AssertionError("router must not be called when an arm is missing")

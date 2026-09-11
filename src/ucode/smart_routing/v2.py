@@ -241,7 +241,6 @@ def _request_claude_routing_decision(
     prompt: str,
     model_ids: list[str],
     *,
-    log: Callable[[str], None] | None = None,
     extra_headers: dict[str, str] | None = None,
 ) -> tuple[routing.RoutingDecision | None, str | None]:
     available: dict[str, str] = {}
@@ -251,14 +250,6 @@ def _request_claude_routing_decision(
         return None, "Anthropic models endpoint returned no Claude models"
     route_options = [(model, "claude") for model in available]
     router_name = routing.configured_router_name()
-    headers = routing.route_request_headers(token, extra_headers)
-    routing.log_route_request(
-        workspace,
-        routing.route_request_body(prompt, route_options, router_name=router_name),
-        headers=headers,
-        log=log,
-        request_log_path=claude_routing.request_log_path(),
-    )
     select_kwargs: dict[str, object] = {
         "router_name": router_name,
         "timeout": CLAUDE_ROUTE_SELECTION_TIMEOUT_S,
@@ -281,7 +272,6 @@ def _route_claude_prompt(
     prompt: str,
     model_ids: list[str] | None = None,
     *,
-    log: Callable[[str], None] | None = None,
     extra_headers: dict[str, str] | None = None,
 ) -> routing.RoutingDecision:
     workspace = state.get("workspace")
@@ -299,7 +289,6 @@ def _route_claude_prompt(
         token,
         prompt,
         model_ids,
-        log=log,
         extra_headers=extra_headers,
     )
     if decision is None:
@@ -473,21 +462,12 @@ def launch_claude(
 
     model_setting = _ClaudeModelSettingGuard(user_settings_path)
 
-    def log_route_request(message: str) -> None:
-        try:
-            CLAUDE_PTY_LOG.parent.mkdir(parents=True, exist_ok=True)
-            with open(CLAUDE_PTY_LOG, "a", encoding="utf-8") as handle:
-                handle.write(f"{time.strftime('%H:%M:%S')} {message}\n")
-        except OSError:
-            pass
-
     def route_prompt(prompt: str) -> claude_pty.FirstPromptRoute:
         decision = _route_claude_prompt(
             state,
             token,
             prompt,
             model_ids,
-            log=log_route_request,
             extra_headers=route_headers,
         )
         return claude_pty.FirstPromptRoute(
@@ -498,7 +478,7 @@ def launch_claude(
 
     print_note(
         "Smart routing v2: the first submitted prompt will select Claude Code's "
-        f"model; log: {CLAUDE_PTY_LOG}."
+        "model."
     )
     try:
         returncode = claude_pty.run_claude_pty(

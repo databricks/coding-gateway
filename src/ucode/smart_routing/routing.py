@@ -170,31 +170,6 @@ def route_request_headers(
     return headers
 
 
-def log_route_request(
-    workspace: str,
-    body: dict[str, Any],
-    *,
-    headers: Mapping[str, str] | None = None,
-    log: Callable[[str], None] | None = None,
-    request_log_path: Path | None = None,
-) -> None:
-    """Record an outgoing route-selection request without credentials."""
-    url = workspace.rstrip("/") + ROUTING_PATH
-    if log is not None:
-        log(f"[ROUTE] request POST {url}: {json.dumps(body, separators=(',', ':'))}")
-    if request_log_path is not None:
-        _append_jsonl(
-            request_log_path,
-            {
-                "at": time.time(),
-                "method": "POST",
-                "url": url,
-                "headers": _redacted_headers(headers or {}),
-                "body": body,
-            },
-        )
-
-
 def select_route(
     workspace: str,
     token: str,

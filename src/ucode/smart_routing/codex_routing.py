@@ -13,11 +13,9 @@ import re
 # ``codex_routing.urllib.request`` — the actual call lives in ``routing``, but
 # Python modules are singletons so patching this name patches the one call site.
 import urllib.request  # noqa: F401
-from collections.abc import Callable, Mapping
-from pathlib import Path
+from collections.abc import Mapping
 from typing import Any
 
-from ucode import config_io
 from ucode.config_io import APP_DIR
 from ucode.smart_routing import routing
 from ucode.smart_routing.routing import RoutingDecision
@@ -29,16 +27,10 @@ SPAWN_AGENT_TOOL_SUFFIX = "spawn_agent"
 CANARY_PATH = APP_DIR / "codex-smart-routing-canary.json"
 AUDIT_PATH = APP_DIR / "codex-smart-routing-audit.jsonl"
 DECISIONS_PATH = APP_DIR / "codex-smart-routing-decisions.jsonl"
-REQUESTS_LOG_FILENAME = "codex-smart-routing-requests.jsonl"
 
 _GPT_RE = re.compile(r"gpt-(\d+)(?:[.-](\d+))?(?:[.-](\d+))?(-.+|[a-z].*)?")
 
 _normalize_model = routing.normalize_model
-
-
-def request_log_path() -> Path:
-    """Return the Codex smart-routing request log path."""
-    return config_io.APP_DIR / REQUESTS_LOG_FILENAME
 
 
 def request_routing_decision(
@@ -48,7 +40,6 @@ def request_routing_decision(
     available_models: list[str],
     *,
     timeout: float = REQUEST_TIMEOUT_S,
-    log: Callable[[str], None] | None = None,
     extra_headers: Mapping[str, str] | None = None,
 ) -> tuple[RoutingDecision | None, str | None]:
     """Ask the router for a servable Codex model."""
@@ -57,14 +48,6 @@ def request_routing_decision(
     if not route_options:
         return None, "no cached model services are available"
     router_name = routing.configured_router_name()
-    headers = routing.route_request_headers(token, extra_headers)
-    routing.log_route_request(
-        workspace,
-        routing.route_request_body(task, route_options, router_name=router_name),
-        headers=headers,
-        log=log,
-        request_log_path=request_log_path(),
-    )
     select_kwargs: dict[str, Any] = {"router_name": router_name, "timeout": timeout}
     if extra_headers:
         select_kwargs["extra_headers"] = extra_headers
@@ -138,7 +121,7 @@ def record_subagent_start(payload: dict[str, Any]) -> dict[str, Any]:
 
 def clear_routing_artifacts() -> None:
     """Remove ucode-owned routing canary and audit files."""
-    routing.clear_artifacts((CANARY_PATH, AUDIT_PATH, DECISIONS_PATH, request_log_path()))
+    routing.clear_artifacts((CANARY_PATH, AUDIT_PATH, DECISIONS_PATH))
 
 
 def _parse_gpt(model: str) -> tuple[int, int, int, str] | None:

@@ -1744,7 +1744,7 @@ def _smart_routing_v2_flag(enabled: bool) -> Iterator[None]:
 
 
 @contextmanager
-def _disable_smart_routing_for_subcommand(tool: str, ctx: typer.Context) -> Iterator[None]:
+def _disable_smart_routing_for_subcommand(tool: str, ctx: Any) -> Iterator[None]:
     """Keep native agent subcommands out of every smart-routing path.
 
     The environment flag is also consulted during bootstrap/version checks,

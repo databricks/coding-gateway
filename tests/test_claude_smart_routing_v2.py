@@ -421,47 +421,6 @@ class TestSubagentRouting:
             "router_name": "task_v2",
         }
 
-    def test_logs_v2_routes_select_request(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(v2.claude_routing.config_io, "APP_DIR", tmp_path)
-        monkeypatch.setenv("SMART_ROUTER_NAME", "task_v2")
-        logged = []
-
-        def fake_select(workspace, token, task, route_options, resolve, **kwargs):
-            return (
-                routing.RoutingDecision(
-                    model=resolve("claude-sonnet-5"),
-                    raw_model="claude-sonnet-5",
-                ),
-                None,
-            )
-
-        monkeypatch.setattr(routing, "select_route", fake_select)
-        decision, error = v2._request_claude_routing_decision(
-            "https://example.com",
-            "secret-token",
-            "inspect the parser",
-            ["system.ai.claude-opus-4-8", "system.ai.claude-sonnet-5"],
-            log=logged.append,
-        )
-
-        assert error is None
-        assert decision is not None
-        assert len(logged) == 1
-        assert logged[0].startswith(
-            "[ROUTE] request POST https://example.com/ai-gateway/routing/v1/routes:select: "
-        )
-        record = json.loads((tmp_path / v2.claude_routing.REQUESTS_LOG_FILENAME).read_text())
-        assert json.loads(logged[0].split(": ", 1)[1]) == record["body"] == {
-            "route_options": [
-                {"model": "claude-opus-4-8", "harness": "claude"},
-                {"model": "claude-sonnet-5", "harness": "claude"},
-            ],
-            "task": {"prompt": "inspect the parser"},
-            "route_selector": {"router_name": "task_v2"},
-        }
-        assert "secret-token" not in logged[0]
-        assert "secret-token" not in (tmp_path / v2.claude_routing.REQUESTS_LOG_FILENAME).read_text()
-
     def test_routes_agent_prompt_with_initialized_model_menu(self, tmp_path, monkeypatch):
         captured = {}
         decisions_path = tmp_path / "decisions.jsonl"

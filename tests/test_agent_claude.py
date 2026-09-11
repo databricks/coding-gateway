@@ -371,6 +371,25 @@ class TestRenderOverlay:
         overlay, _ = claude.render_overlay(WS, "s4")
         assert "Databricks-Model-Provider-Service" not in overlay["env"]["ANTHROPIC_CUSTOM_HEADERS"]
 
+    def test_parent_adds_discovery_header(self):
+        overlay, _ = claude.render_overlay(WS, "s4", parent_schema="main.default")
+        assert (
+            "Databricks-Model-Service-Parent-Schema: main.default"
+            in overlay["env"]["ANTHROPIC_CUSTOM_HEADERS"]
+        )
+
+    def test_provider_suppresses_discovery_header(self):
+        overlay, _ = claude.render_overlay(
+            WS,
+            "s4",
+            provider="main.default.anthropic",
+            parent_schema="main.default",
+        )
+        assert (
+            "Databricks-Model-Service-Parent-Schema"
+            not in overlay["env"]["ANTHROPIC_CUSTOM_HEADERS"]
+        )
+
     def test_bedrock_provider_pins_model_ids(self):
         provider_models = {
             "opus": "global.anthropic.claude-opus-4-8",
@@ -459,6 +478,15 @@ class TestRenderOverlayUserAgent:
 
 
 class TestMergeAnthropicCustomHeaders:
+    def test_removes_stale_parent_header(self):
+        existing = "X-User: keep\nDatabricks-Model-Service-Parent-Schema: main.default"
+        managed = "x-databricks-use-coding-agent-mode: true"
+
+        merged = claude._merge_anthropic_custom_headers(existing, managed)
+
+        assert "X-User: keep" in merged
+        assert "Databricks-Model-Service-Parent-Schema" not in merged
+
     def test_merges_existing_settings_with_ucode_managed_headers(self):
         headers_from_existing_settings = "\n".join(
             [

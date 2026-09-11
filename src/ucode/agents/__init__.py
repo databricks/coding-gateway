@@ -424,6 +424,7 @@ def configure_tool(
     route_root_model: str | None = None,
     custom_model: str | None = None,
     coding_agent_config_defaults: dict[str, str] | None = None,
+    parent_schema: str | None = None,
 ) -> dict:
     result: dict | tuple[dict, str]
     if tool == "codex":
@@ -442,6 +443,7 @@ def configure_tool(
             route_root_model=route_root_model,
             custom_model=custom_model,
             coding_agent_config_defaults=coding_agent_config_defaults,
+            parent_schema=parent_schema,
         )
     else:
         # Every tool in this branch needs a model — including gemini under a provider,

@@ -1383,27 +1383,7 @@ def apply_mcp_server_changes(
             )
         changed = True
 
-    total_ops = sum(len(ops) for ops in work.values())
-    if total_ops == 0:
-        return changed
-
-    completed = _Counter()
-
-    def run_client_ops(ops: list[Callable[[], object]]) -> None:
-        for op in ops:
-            op()
-            completed.increment()
-
-    def message() -> str:
-        return f"Configuring MCP servers... {completed.value()}/{total_ops}"
-
-    with spinner(message):
-        with ThreadPoolExecutor(max_workers=max(1, len(work))) as pool:
-            futures = [pool.submit(run_client_ops, ops) for ops in work.values() if ops]
-            # Surface the first failure (if any) once all client threads finish.
-            for future in as_completed(futures):
-                future.result()
-
+    _run_client_work(work)
     return changed
 
 
@@ -1421,6 +1401,29 @@ class _Counter:
     def value(self) -> int:
         with self._lock:
             return self._value
+
+
+def _run_client_work(work: dict[str, list[Callable[[], object]]]) -> None:
+    total_ops = sum(len(ops) for ops in work.values())
+    if total_ops == 0:
+        return
+
+    completed = _Counter()
+
+    def run_client_ops(ops: list[Callable[[], object]]) -> None:
+        for op in ops:
+            op()
+            completed.increment()
+
+    def message() -> str:
+        return f"Configuring MCP servers... {completed.value()}/{total_ops}"
+
+    with spinner(message):
+        with ThreadPoolExecutor(max_workers=max(1, len(work))) as pool:
+            futures = [pool.submit(run_client_ops, ops) for ops in work.values() if ops]
+            # Surface the first failure (if any) once all client threads finish.
+            for future in as_completed(futures):
+                future.result()
 
 
 def purge_cross_workspace_mcp_residue(state: dict, workspace: str) -> None:
@@ -2199,6 +2202,39 @@ def _print_skills_summary(entry: dict) -> None:
     )
 
 
+def apply_skills_mcp_changes(
+    original_entry: dict | None,
+    working_entry: dict,
+    clients: list[str],
+    workspace: str,
+    profile: str | None = None,
+    *,
+    use_pat: bool = False,
+) -> bool:
+    """Register the skills connection for every client in one concurrent batch, each with its own scoped URL."""
+    configured_before = set(original_entry.get("clients") or []) if original_entry else set()
+    work: dict[str, list[Callable[[], object]]] = {}
+    changed = False
+    for client in clients:
+        locations = skill_locations_for_client(working_entry, client)
+        unchanged = (
+            client in configured_before
+            and skill_locations_for_client(original_entry, client) == locations
+        )
+        if unchanged:
+            continue
+        url = build_skills_mcp_url(workspace, locations)
+        work[client] = [
+            lambda c=client, u=url: configure_client_mcp_server(
+                c, SKILLS_MCP_SERVER_NAME, u, workspace, profile, use_pat=use_pat, always_load=True
+            )
+        ]
+        changed = True
+
+    _run_client_work(work)
+    return changed
+
+
 def _update_skills_mcp(
     state: dict,
     workspace: str,
@@ -2217,35 +2253,14 @@ def _update_skills_mcp(
     if working_entry is None:
         raise RuntimeError("Failed to build the Skills MCP connection.")
 
-    changed = False
-    for client in clients:
-        working_view = [
-            _build_skills_entry(
-                workspace,
-                {client: skill_locations_for_client(working_entry, client)},
-                [client],
-            )
-        ]
-        original_view = []
-        if original_entry is not None and client in (original_entry.get("clients") or []):
-            original_view = [
-                _build_skills_entry(
-                    workspace,
-                    {client: skill_locations_for_client(original_entry, client)},
-                    [client],
-                )
-            ]
-        changed = (
-            apply_mcp_server_changes(
-                original_view,
-                working_view,
-                [client],
-                workspace,
-                profile,
-                use_pat=bool(state.get("use_pat")) if use_pat is None else use_pat,
-            )
-            or changed
-        )
+    changed = apply_skills_mcp_changes(
+        original_entry,
+        working_entry,
+        clients,
+        workspace,
+        profile,
+        use_pat=bool(state.get("use_pat")) if use_pat is None else use_pat,
+    )
     if changed or original != working:
         state["mcp_servers"] = working
         save_state(state)

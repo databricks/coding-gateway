@@ -547,6 +547,51 @@ class TestApplyMcpServerChanges:
         assert mcp.apply_mcp_server_changes(servers, servers, ["claude"], WS) is False
 
 
+class TestApplySkillsMcpChanges:
+    def _entry(self, by_client):
+        return mcp._build_skills_entry(WS, by_client, list(by_client))
+
+    def test_divergent_scopes_configure_each_client_in_one_batch(self, monkeypatch):
+        configured: list[tuple[str, str, object]] = []
+        monkeypatch.setattr(
+            mcp,
+            "configure_client_mcp_server",
+            lambda client, name, url, *a, **kw: (
+                configured.append((client, url, kw.get("always_load"))) or []
+            ),
+        )
+        batches: list[list[str]] = []
+        run = mcp._run_client_work
+        monkeypatch.setattr(
+            mcp, "_run_client_work", lambda work: batches.append(sorted(work)) or run(work)
+        )
+
+        working = self._entry({"claude": ["a.b"], "codex": ["c.d"]})
+        changed = mcp.apply_skills_mcp_changes(None, working, ["claude", "codex"], WS)
+
+        assert changed is True
+        assert batches == [["claude", "codex"]]
+        urls = {client: url for client, url, _ in configured}
+        assert urls["claude"] == mcp.build_skills_mcp_url(WS, ["a.b"])
+        assert urls["codex"] == mcp.build_skills_mcp_url(WS, ["c.d"])
+        assert all(always_load is True for *_, always_load in configured)
+
+    def test_skips_clients_whose_scope_is_unchanged(self, monkeypatch):
+        configured: list[str] = []
+        monkeypatch.setattr(
+            mcp,
+            "configure_client_mcp_server",
+            lambda client, *a, **kw: configured.append(client) or [],
+        )
+        original = self._entry({"claude": ["a.b"], "codex": ["c.d"]})
+        working = self._entry({"claude": ["a.b"], "codex": ["c.d", "e.f"]})
+
+        changed = mcp.apply_skills_mcp_changes(original, working, ["claude", "codex"], WS)
+
+        assert changed is True
+        assert configured == ["codex"]
+
+
 class TestConfigureMcpCommand:
     def test_skips_existing_server_state_by_name(self, monkeypatch):
         saved_states: list[dict] = []

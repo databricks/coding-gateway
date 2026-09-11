@@ -106,6 +106,7 @@ from ucode.mcp import (
     SKILLS_MCP_KIND,
     add_mcp_command,
     add_skills_command,
+    agents_share_one_scope,
     apply_managed_mcp_servers,
     available_mcp_clients,
     configure_mcp_command,
@@ -114,6 +115,7 @@ from ucode.mcp import (
     purge_cross_workspace_mcp_residue,
     remove_mcp_command,
     revert_mcp_configs,
+    skill_locations_for_client,
 )
 from ucode.skills_download import (
     configure_skills_download_command,
@@ -997,17 +999,25 @@ def status() -> int:
     if not skill_mcp_entry:
         print_kv("Skills", "not configured")
     else:
-        locations = skill_mcp_entry.get("skill_locations") or []
-        print_kv(
-            "Skill MCP Locations",
-            ", ".join(locations) if locations else "none — utility tools only",
-        )
-        configured_agents = [
-            str(MCP_CLIENTS[client]["display"])
+        scopes = {
+            client: skill_locations_for_client(skill_mcp_entry, client)
             for client in (skill_mcp_entry.get("clients") or [])
             if client in MCP_CLIENTS
-        ]
-        print_kv("Configured", ", ".join(configured_agents) if configured_agents else "none")
+        }
+        if agents_share_one_scope(scopes):
+            locations = next(iter(scopes.values()), [])
+            print_kv(
+                "Skill MCP Locations",
+                ", ".join(locations) if locations else "none — utility tools only",
+            )
+            configured_agents = [str(MCP_CLIENTS[client]["display"]) for client in scopes]
+            print_kv("Configured", ", ".join(configured_agents) if configured_agents else "none")
+        else:
+            for client, locations in scopes.items():
+                print_kv(
+                    f"{MCP_CLIENTS[client]['display']} skill MCP locations",
+                    ", ".join(locations) if locations else "none — utility tools only",
+                )
 
     print_heading("Tracing")
     tracing = state.get("tracing") or {}

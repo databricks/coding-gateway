@@ -2095,6 +2095,10 @@ def skill_locations_for_client(entry: dict | None, client: str) -> list[str]:
     return _skill_locations_by_client(entry).get(client, [])
 
 
+def agents_share_one_scope(scopes: dict[str, list[str]]) -> bool:
+    return len({tuple(locations) for locations in scopes.values()}) <= 1
+
+
 def _build_skills_entry(
     workspace: str,
     locations_by_client: dict[str, list[str]],
@@ -2183,8 +2187,7 @@ def _print_skills_summary(entry: dict) -> None:
         for client in (entry.get("clients") or [])
         if client in MCP_CLIENTS
     }
-    distinct_scopes = {tuple(locations) for locations in scopes.values()}
-    if len(distinct_scopes) <= 1:
+    if agents_share_one_scope(scopes):
         locations = next(iter(scopes.values()), [])
         print_kv("URL", build_skills_mcp_url(_skills_workspace(entry), locations))
         print_kv("Configured", ", ".join(clients) if clients else "none")

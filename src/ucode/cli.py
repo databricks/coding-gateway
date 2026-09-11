@@ -1944,9 +1944,7 @@ def _should_launch_smart_routing(
     return _smart_routing_launch_shape(tool, tool_args, explicit_prompt)
 
 
-def _smart_routing_launch_shape(
-    tool: str, tool_args: list[str], explicit_prompt: bool
-) -> bool:
+def _smart_routing_launch_shape(tool: str, tool_args: list[str], explicit_prompt: bool) -> bool:
     """Whether the forwarded arguments represent an interactive launch."""
     if not tool_args or explicit_prompt:
         return True

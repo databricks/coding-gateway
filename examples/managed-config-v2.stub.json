@@ -1,0 +1,53 @@
+{
+  "spec_version": 1,
+  "retrieved_time": "2026-09-11T00:00:00Z",
+  "default_agent": "CODING_AGENT_CLAUDE_CODE",
+  "enabled_agents": [
+    {
+      "agent": "CODING_AGENT_CLAUDE_CODE",
+      "config": {
+        "models": {
+          "model_services": [
+            "system.ai.claude-opus-4-8",
+            "system.ai.claude-sonnet-4-6",
+            "system.ai.claude-haiku-4-5"
+          ]
+        },
+        "default_models": {
+          "default_model": "system.ai.claude-opus-4-8",
+          "default_opus_model": "system.ai.claude-opus-4-8",
+          "default_sonnet_model": "system.ai.claude-sonnet-4-6",
+          "default_haiku_model": "system.ai.claude-haiku-4-5"
+        },
+        "smart_routing": { "enabled": false },
+        "http_headers": {}
+      }
+    },
+    {
+      "agent": "CODING_AGENT_CODEX",
+      "config": {
+        "models": { "model_provider_service": "main.default.openai-mps" },
+        "default_models": { "default_model": "gpt-5.4" }
+      }
+    }
+  ],
+  "mcp_servers": {
+    "names": ["system.ai.github"],
+    "tags": ["MCP_SERVER_TYPE_UC_SERVICE"]
+  },
+  "skills": {
+    "names": ["system.ai.pdf-extraction"],
+    "tags": []
+  },
+  "tracing": { "enabled": true },
+  "spend_tiers": {
+    "budget_id": "00000000-0000-0000-0000-000000000000",
+    "tiers": [
+      {
+        "spending_percentage": 0.9,
+        "recommended_agent": "CODING_AGENT_CODEX",
+        "recommended_model": "gpt-5.4"
+      }
+    ]
+  }
+}

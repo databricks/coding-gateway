@@ -1909,7 +1909,7 @@ MANAGED_CONFIG_UPDATE_MASK_PATHS: tuple[str, ...] = (
     "mcp_servers",
     "skills",
     "tracing",
-    "budget_policy",
+    "spend_tiers",
 )
 
 

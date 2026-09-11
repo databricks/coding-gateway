@@ -1774,14 +1774,15 @@ def _reject_disabled_agent(managed: dict | None, tool: str) -> None:
         )
 
 
-def _fetch_managed_config(state: dict) -> ManagedConfigResult:
+def _fetch_managed_config(state: dict, *, force: bool = False) -> ManagedConfigResult:
     """The workspace's managed config for this launch, plus whether the feature is disabled.
 
     ``ManagedConfigResult(None, True)`` when the workspace has the feature disabled server-side;
-    ``ManagedConfigResult(None, False)`` when the feature is on but no config is published.
+    ``ManagedConfigResult(None, False)`` when the feature is on but no config is published. ``force``
+    bypasses the refresh TTL so ``--refresh`` always re-reads the workspace.
     """
     with spinner("Loading..."):
-        return refresh_managed_config(state)
+        return refresh_managed_config(state, force=force)
 
 
 def _note_recommended_agent(recommendation: dict | None, tool: str) -> None:
@@ -2017,7 +2018,9 @@ def _launch_tool(
         # control-plane round trip and any fallback warning it printed.
         coding_agent_config_feature_disabled = False
         if managed is None:
-            managed, coding_agent_config_feature_disabled = _fetch_managed_config(state)
+            managed, coding_agent_config_feature_disabled = _fetch_managed_config(
+                state, force=refresh
+            )
         # Checked before discovery, which can take tens of seconds, so a blocked launch fails fast.
         _reject_disabled_agent(managed, tool)
         # Discovery exists to find models and isn't needed for managed config that already names them.

@@ -66,9 +66,10 @@ class TestBuildPayload:
             payload = export_mod.build_export_payload()
         assert "name" not in payload
         assert payload["default_agent"] == "CODING_AGENT_CLAUDE_CODE"
-        assert payload["mcp_servers"] == [
-            {"name": "system.ai.slack", "type": "MCP_SERVER_TYPE_UC_SERVICE"}
-        ]
+        assert payload["mcp_servers"] == {
+            "names": ["system.ai.slack"],
+            "tags": ["MCP_SERVER_TYPE_UC_SERVICE"],
+        }
 
     def test_envelope_workspace_first_then_spec_version(self):
         with _with_manifest(FULL_MANIFEST):

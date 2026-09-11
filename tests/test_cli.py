@@ -888,7 +888,7 @@ class TestClaudeModelFlag:
         monkeypatch.setattr(cli_mod, "load_state", lambda: MINIMAL_STATE)
         monkeypatch.setattr(cli_mod, "ensure_provider_state", lambda t: MINIMAL_STATE)
         monkeypatch.setattr(cli_mod, "configure_shared_state", lambda *a, **k: MINIMAL_STATE)
-        monkeypatch.setattr(cli_mod, "_fetch_managed_config", lambda s: (None, False))
+        monkeypatch.setattr(cli_mod, "_fetch_managed_config", lambda s, **kwargs: (None, False))
         monkeypatch.setattr(cli_mod, "_fetch_budget_recommendation", lambda s, m: None)
         mock_launch = MagicMock()
         monkeypatch.setattr(cli_mod, "launch_agent", mock_launch)
@@ -1027,7 +1027,7 @@ class TestGeminiProviderLaunch:
         monkeypatch.setattr("ucode.cli.load_state", lambda: state)
         monkeypatch.setattr("ucode.cli.ensure_provider_state", lambda t: state)
         monkeypatch.setattr("ucode.cli.configure_shared_state", lambda *a, **k: state)
-        monkeypatch.setattr("ucode.cli._fetch_managed_config", lambda s: (None, False))
+        monkeypatch.setattr("ucode.cli._fetch_managed_config", lambda s, **kwargs: (None, False))
         monkeypatch.setattr("ucode.cli.resolve_provider_models", resolve_provider_models)
         monkeypatch.setattr("ucode.cli.configure_tool", lambda *a, **k: state)
         monkeypatch.setattr(
@@ -3374,12 +3374,15 @@ class TestFetchManagedConfig:
 
     def test_fetches_fresh_when_enabled(self, monkeypatch):
         monkeypatch.setattr(
-            "ucode.cli.refresh_managed_config", lambda state: ({"enabled_agents": {}}, False)
+            "ucode.cli.refresh_managed_config",
+            lambda state, **kwargs: ({"enabled_agents": {}}, False),
         )
         assert self._fetch({"workspace": "https://w"}) == ({"enabled_agents": {}}, False)
 
     def test_feature_disabled_returns_none_and_the_flag(self, monkeypatch):
-        monkeypatch.setattr("ucode.cli.refresh_managed_config", lambda state: (None, True))
+        monkeypatch.setattr(
+            "ucode.cli.refresh_managed_config", lambda state, **kwargs: (None, True)
+        )
         assert self._fetch({"workspace": "https://w"}) == (None, True)
 
 
@@ -3396,7 +3399,9 @@ class TestManagedConfigDecidesDiscoveryFromFreshRead:
         }
         fresh = {"enabled_agents": {"claude": {"model_config": {}}}}
         monkeypatch.setattr("ucode.cli.load_managed_state", lambda ws: stale_cache)
-        monkeypatch.setattr("ucode.cli.refresh_managed_config", lambda state: (fresh, False))
+        monkeypatch.setattr(
+            "ucode.cli.refresh_managed_config", lambda state, **kwargs: (fresh, False)
+        )
 
         state = dict(MINIMAL_STATE)
         with (
@@ -3436,9 +3441,13 @@ class TestBareUcode:
         monkeypatch.setattr("ucode.cli.load_state", lambda: {"workspace": "https://w"})
 
         if coding_agent_config_feature_disabled:
-            monkeypatch.setattr("ucode.cli.refresh_managed_config", lambda state: (None, True))
+            monkeypatch.setattr(
+                "ucode.cli.refresh_managed_config", lambda state, **kwargs: (None, True)
+            )
         else:
-            monkeypatch.setattr("ucode.cli.refresh_managed_config", lambda state: (managed, False))
+            monkeypatch.setattr(
+                "ucode.cli.refresh_managed_config", lambda state, **kwargs: (managed, False)
+            )
 
         monkeypatch.setattr("ucode.cli.load_managed_state", lambda ws: cached)
         monkeypatch.setattr("ucode.cli.get_databricks_token", lambda *a, **k: "tok")
@@ -3565,7 +3574,9 @@ class TestBareUcode:
             "default_agent": "claude",
             "enabled_agents": {"claude": {"model_config": {"default_model": "m"}}},
         }
-        monkeypatch.setattr("ucode.cli.refresh_managed_config", lambda state: (managed, False))
+        monkeypatch.setattr(
+            "ucode.cli.refresh_managed_config", lambda state, **kwargs: (managed, False)
+        )
         monkeypatch.setattr("ucode.cli._fetch_budget_recommendation", lambda state, m: None)
         monkeypatch.setattr("ucode.cli._print_managed_summary", lambda *a, **k: None)
         seen: dict = {}

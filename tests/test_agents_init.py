@@ -360,7 +360,8 @@ class TestResolveProviderModels:
         )
         assert (models, error, relayed) == (None, None, False)
 
-    def test_relayed_anthropic_flagged(self, monkeypatch):
+    def test_relayed_allow_all_pins_nothing(self, monkeypatch):
+        # allow_all relay declares no Claude targets: nothing pinned, still flagged relayed.
         self._patch(
             monkeypatch, {"provider_type": "anthropic", "targets": [], "relayed": True}, None
         )
@@ -369,6 +370,24 @@ class TestResolveProviderModels:
         )
         assert error is None
         assert models is None
+        assert relayed is True
+
+    def test_relayed_anthropic_with_targets_pins_family(self, monkeypatch):
+        # A curated relay maps its declared targets by family so --model can resolve against them.
+        self._patch(
+            monkeypatch,
+            {
+                "provider_type": "anthropic",
+                "targets": ["claude-opus-4-8", "claude-haiku-4-5"],
+                "relayed": True,
+            },
+            None,
+        )
+        models, error, relayed = agents_mod.resolve_provider_models(
+            "claude", self._STATE, "main.a.relayed_ent"
+        )
+        assert error is None
+        assert models == {"opus": "claude-opus-4-8", "haiku": "claude-haiku-4-5"}
         assert relayed is True
 
     def test_bedrock_returns_pinned_models(self, monkeypatch):

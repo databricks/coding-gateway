@@ -912,27 +912,27 @@ class TestClaudeModelFlag:
         assert mock_configure.call_args.kwargs["route_root_model"] == "claude-haiku-4-5"
         assert mock_configure.call_args.kwargs["custom_model"] is None
 
-    def test_provider_without_opus_auto_picks_best_servable_tier(self, monkeypatch):
-        # No --model, and the service declares no opus target: launch on the most capable tier it
-        # does offer (sonnet) instead of dead-ending on Claude Code's opus default.
+    def test_provider_without_sonnet_pins_next_tier(self, monkeypatch):
+        # No --model, sonnet not offered: pin the next preferred allowed tier (haiku here) rather
+        # than dead-ending on Claude Code's sonnet default, which this service doesn't allow.
         result, mock_configure, _ = self._provider_launch(
             monkeypatch,
             ["claude", "--provider", "cat.schema.svc"],
-            {"sonnet": "claude-sonnet-5", "haiku": "claude-haiku-4-5"},
+            {"haiku": "claude-haiku-4-5"},
         )
         assert result.exit_code == 0, result.output
-        assert mock_configure.call_args.kwargs["route_root_model"] == "claude-sonnet-5"
+        assert mock_configure.call_args.kwargs["route_root_model"] == "claude-haiku-4-5"
 
-    def test_provider_with_opus_keeps_claude_default(self, monkeypatch):
-        # Opus is offered, so Claude Code's own default already works — pin nothing (no ANTHROPIC_MODEL
-        # and no duplicate /model picker row).
+    def test_provider_with_opus_still_defaults_to_sonnet(self, monkeypatch):
+        # No --model: pin sonnet (Claude Code's default tier) whenever the service allows it, even
+        # when opus is on offer — we always pin an allowed target instead of deferring to the default.
         result, mock_configure, _ = self._provider_launch(
             monkeypatch,
             ["claude", "--provider", "cat.schema.svc"],
             {"opus": "claude-opus-4-8", "sonnet": "claude-sonnet-5"},
         )
         assert result.exit_code == 0, result.output
-        assert mock_configure.call_args.kwargs["route_root_model"] is None
+        assert mock_configure.call_args.kwargs["route_root_model"] == "claude-sonnet-5"
 
     def test_model_family_not_offered_by_provider_errors(self, monkeypatch):
         result, _, _ = self._provider_launch(
@@ -958,7 +958,7 @@ class TestClaudeModelFlag:
         assert "ignored" not in _strip_ansi(result.output)
 
     def test_relayed_provider_without_model_forwards_nothing(self, monkeypatch):
-        # No --model on a relayed launch: nothing to forward.
+        # No --model on an allow_all relay: nothing to forward.
         result, _, mock_launch = self._provider_launch(
             monkeypatch,
             ["claude", "--provider", "cat.schema.svc"],
@@ -967,6 +967,39 @@ class TestClaudeModelFlag:
         )
         assert result.exit_code == 0, result.output
         assert mock_launch.call_args.args[2] == []
+
+    def test_relayed_allowlist_resolves_model_to_declared_target(self, monkeypatch):
+        # Curated relay: --model resolves to the declared id, which is what gets forwarded.
+        result, _, mock_launch = self._provider_launch(
+            monkeypatch,
+            ["claude", "--model", "opus", "--provider", "cat.schema.svc"],
+            {"opus": "claude-opus-4-8", "haiku": "claude-haiku-4-5"},
+            relayed=True,
+        )
+        assert result.exit_code == 0, result.output
+        assert mock_launch.call_args.args[2] == ["--model", "claude-opus-4-8"]
+
+    def test_relayed_allowlist_auto_picks_preferred_tier_without_model(self, monkeypatch):
+        # Curated relay, no --model: forward the preferred allowed tier (sonnet), not the (maybe
+        # forbidden) default. Same resolution as the non-relayed path.
+        result, _, mock_launch = self._provider_launch(
+            monkeypatch,
+            ["claude", "--provider", "cat.schema.svc"],
+            {"opus": "claude-opus-4-8", "sonnet": "claude-sonnet-5"},
+            relayed=True,
+        )
+        assert result.exit_code == 0, result.output
+        assert mock_launch.call_args.args[2] == ["--model", "claude-sonnet-5"]
+
+    def test_relayed_allowlist_rejects_unavailable_family(self, monkeypatch):
+        result, _, _ = self._provider_launch(
+            monkeypatch,
+            ["claude", "--model", "opus", "--provider", "cat.schema.svc"],
+            {"sonnet": "claude-sonnet-5", "haiku": "claude-haiku-4-5"},
+            relayed=True,
+        )
+        assert result.exit_code == 1
+        assert "does not offer a 'opus' model" in result.output
 
     def test_provider_sets_transient_claude_launch_marker(self):
         state = dict(MINIMAL_STATE)

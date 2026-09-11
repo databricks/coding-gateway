@@ -2403,22 +2403,25 @@ def map_claude_family_models(targets: list[str]) -> dict[str, str]:
     return result
 
 
-# Claude Code starts every session on its opus tier, which the gateway 403s when a Model Provider
-# Service declares no opus target. When opus is missing, fall back to the most capable tier the
-# service does offer. opus > sonnet > haiku.
-_CLAUDE_LAUNCH_TIER_PREFERENCE = ("opus", "sonnet", "haiku")
+# A bare launch pins the first tier the service offers, so it never dead-ends on a model the
+# gateway 403s. Sonnet first: it's Claude Code's own default tier, so we keep that balanced default
+# rather than jumping to opus, then fall back to the next offered tier when sonnet isn't allowed.
+_CLAUDE_LAUNCH_TIER_PREFERENCE = ("sonnet", "opus", "haiku")
 
 
 def resolve_provider_launch_model(model: str | None, provider_models: dict[str, str]) -> str | None:
-    """Pick the model a provider-routed Claude session starts on, or None to keep Claude Code's default.
+    """Pick the model a provider-routed Claude session starts on, or None if it declares no tier.
 
     ``provider_models`` maps the Claude families a service declares to their target ids (see
     ``map_claude_family_models``). With an explicit ``model`` (``ucode claude --model``) the user's
     choice wins: a family alias resolves to that tier's declared target (erroring when the service
     doesn't offer it), any other value is trusted as a raw target id the service allows. Without one,
-    return None when the service offers opus — Claude Code's own default already works, so we avoid
-    setting ANTHROPIC_MODEL and the duplicate ``/model`` picker row it produces — else the most
-    capable tier the service does offer, so the launch doesn't dead-end on an unservable opus.
+    pin the service's preferred offered tier (``_CLAUDE_LAUNCH_TIER_PREFERENCE``).
+
+    We always pin a concrete offered target rather than letting Claude Code fall back to its own
+    launch default: that default (observed: ``claude-sonnet-5``) isn't guaranteed to be in a curated
+    service's allowlist, so deferring to it can 403, while an offered tier can't. The relayed and
+    non-relayed paths resolve identically; the user can still switch tiers in-session via ``/model``.
     """
     if model:
         if model in ANTHROPIC_FAMILIES:
@@ -2431,8 +2434,6 @@ def resolve_provider_launch_model(model: str | None, provider_models: dict[str, 
                 )
             return target
         return model
-    if provider_models.get("opus"):
-        return None
     return next(
         (
             provider_models[fam]

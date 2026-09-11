@@ -70,48 +70,6 @@ def test_routes_with_default_claude_menu(monkeypatch):
     }
 
 
-def test_routes_select_forwards_gateway_headers_without_auth_override(monkeypatch):
-    captured = {}
-
-    def fake_urlopen(request, timeout):
-        captured["headers"] = {key.casefold(): value for key, value in request.headers.items()}
-        return _Response({"route_selection": [{"route_option": {"model": "claude-sonnet-5"}}]})
-
-    monkeypatch.setattr(claude_routing.urllib.request, "urlopen", fake_urlopen)
-
-    decision, error = claude_routing.request_routing_decision(
-        WS,
-        "real-token",
-        "Map the codebase",
-        ["system.ai.claude-opus-4-8", "system.ai.claude-sonnet-5"],
-        extra_headers=claude_routing.routing.route_forward_headers_from_lines(
-            "\n".join(
-                [
-                    "x-databricks-traffic-id: testenv://liteswap/arnav-r315-task-v3",
-                    "x-databricks-use-coding-agent-mode: true",
-                    'Databricks-Ai-Gateway-Request-Tags: {"source":"isaac-cli"}',
-                    "Authorization: Bearer wrong-token",
-                    "X-Ignored: no",
-                ]
-            )
-        ),
-    )
-
-    assert error is None
-    assert decision is not None
-    assert captured["headers"]["authorization"] == "Bearer real-token"
-    assert (
-        captured["headers"]["x-databricks-traffic-id"]
-        == "testenv://liteswap/arnav-r315-task-v3"
-    )
-    assert captured["headers"]["x-databricks-use-coding-agent-mode"] == "true"
-    assert (
-        captured["headers"]["databricks-ai-gateway-request-tags"]
-        == '{"source":"isaac-cli"}'
-    )
-    assert "x-ignored" not in captured["headers"]
-
-
 def test_missing_arm_short_circuits_without_calling_router(monkeypatch):
     def fail(*args, **kwargs):
         raise AssertionError("router must not be called when an arm is missing")

@@ -257,12 +257,6 @@ class TestV2Launch:
             display_model="Claude Sonnet 5",
             rationale="Selected for the parser task.",
         )
-        assert routed_call["extra_headers"]["x-databricks-traffic-id"] == (
-            "testenv://liteswap/arnav-r315-task-v3"
-        )
-        assert routed_call["extra_headers"]["Databricks-Ai-Gateway-Request-Tags"] == (
-            '{"source":"isaac-cli"}'
-        )
         assert {definition["model"] for definition in captured["agents"].values()} == {
             "system.ai.claude-opus-4-8",
             "system.ai.claude-sonnet-5",
@@ -425,18 +419,12 @@ class TestSubagentRouting:
         captured = {}
         decisions_path = tmp_path / "decisions.jsonl"
         monkeypatch.setattr(v2.claude_routing, "DECISIONS_PATH", decisions_path)
-        monkeypatch.setenv(
-            "ANTHROPIC_CUSTOM_HEADERS",
-            "x-databricks-traffic-id: testenv://liteswap/arnav-r315-task-v3",
-        )
-
         def fake_select(workspace, token, task, route_options, resolve, **kwargs):
             captured.update(
                 workspace=workspace,
                 token=token,
                 task=task,
                 route_options=list(route_options),
-                extra_headers=kwargs.get("extra_headers"),
             )
             return (
                 routing.RoutingDecision(
@@ -469,9 +457,6 @@ class TestSubagentRouting:
                 ("claude-opus-4-8", "claude"),
                 ("claude-sonnet-5", "claude"),
             ],
-            "extra_headers": {
-                "x-databricks-traffic-id": "testenv://liteswap/arnav-r315-task-v3"
-            },
         }
         updated_input = output["hookSpecificOutput"]["updatedInput"]
         assert "model" not in updated_input

@@ -13,7 +13,6 @@ import re
 # ``codex_routing.urllib.request`` — the actual call lives in ``routing``, but
 # Python modules are singletons so patching this name patches the one call site.
 import urllib.request  # noqa: F401
-from collections.abc import Mapping
 from typing import Any
 
 from ucode.config_io import APP_DIR
@@ -40,7 +39,6 @@ def request_routing_decision(
     available_models: list[str],
     *,
     timeout: float = REQUEST_TIMEOUT_S,
-    extra_headers: Mapping[str, str] | None = None,
 ) -> tuple[RoutingDecision | None, str | None]:
     """Ask the router for a servable Codex model."""
     available = {_normalize_model(model): model for model in available_models}
@@ -49,8 +47,6 @@ def request_routing_decision(
         return None, "no cached model services are available"
     router_name = routing.configured_router_name()
     select_kwargs: dict[str, Any] = {"router_name": router_name, "timeout": timeout}
-    if extra_headers:
-        select_kwargs["extra_headers"] = extra_headers
     return routing.select_route(
         workspace,
         token,
@@ -75,7 +71,6 @@ def route_pre_tool_use(
     available_models: list[str],
     timeout: float = REQUEST_TIMEOUT_S,
     audit_decision: bool = False,
-    extra_headers: Mapping[str, str] | None = None,
 ) -> dict[str, Any] | None:
     """Route one Codex ``spawn_agent`` call and rewrite its model."""
     record = None
@@ -93,7 +88,6 @@ def route_pre_tool_use(
             task,
             available_models,
             timeout=timeout,
-            extra_headers=extra_headers,
         ),
         default_task_label="Codex subagent task",
         model_id_mapper=codex_model_id,

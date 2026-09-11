@@ -16,7 +16,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,22 +25,6 @@ ROUTER_NAME = "task_v2"
 ROUTER_NAME_ENV_VAR = "SMART_ROUTER_NAME"
 ROUTING_PATH = "/ai-gateway/routing/v1/routes:select"
 REQUEST_TIMEOUT_S = 30.0
-ROUTE_FORWARD_HEADER_NAMES = frozenset(
-    {
-        "databricks-ai-gateway-request-tags",
-        "user-agent",
-        "x-databricks-traffic-id",
-        "x-databricks-use-coding-agent-mode",
-    }
-)
-SENSITIVE_HEADER_NAMES = frozenset(
-    {
-        "authorization",
-        "cookie",
-        "proxy-authorization",
-        "x-databricks-ai-gateway-token",
-    }
-)
 SUBAGENT_ROUTING_DISCLAIMER = (
     "Spawned subagents are routed independently based on their own complexity."
 )
@@ -134,42 +118,6 @@ def route_request_body(
     }
 
 
-def route_forward_headers_from_lines(headers: object) -> dict[str, str]:
-    """Parse newline-delimited gateway headers to forward to ``routes:select``."""
-    if not isinstance(headers, str):
-        return {}
-    forwarded: dict[str, str] = {}
-    for line in headers.splitlines():
-        name, separator, value = line.partition(":")
-        normalized = name.strip().casefold()
-        if not separator or normalized not in ROUTE_FORWARD_HEADER_NAMES:
-            continue
-        clean_name = name.strip()
-        clean_value = value.strip()
-        if clean_name and clean_value:
-            forwarded[clean_name] = clean_value
-    return forwarded
-
-
-def route_request_headers(
-    token: str,
-    extra_headers: Mapping[str, str] | None = None,
-) -> dict[str, str]:
-    """Return HTTP headers for ``routes:select`` without allowing auth overrides."""
-    headers: dict[str, str] = {}
-    for name, value in (extra_headers or {}).items():
-        normalized = name.strip().casefold()
-        if normalized not in ROUTE_FORWARD_HEADER_NAMES:
-            continue
-        clean_name = name.strip()
-        clean_value = value.strip()
-        if clean_name and clean_value:
-            headers[clean_name] = clean_value
-    headers["Authorization"] = f"Bearer {token}"
-    headers["Content-Type"] = "application/json"
-    return headers
-
-
 def select_route(
     workspace: str,
     token: str,
@@ -179,7 +127,6 @@ def select_route(
     *,
     router_name: str,
     timeout: float = REQUEST_TIMEOUT_S,
-    extra_headers: Mapping[str, str] | None = None,
 ) -> tuple[RoutingDecision | None, str | None]:
     """POST one ``routes:select`` request and resolve the router's pick.
 
@@ -193,7 +140,10 @@ def select_route(
     request = urllib.request.Request(
         workspace.rstrip("/") + ROUTING_PATH,
         data=json.dumps(body).encode("utf-8"),
-        headers=route_request_headers(token, extra_headers),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
         method="POST",
     )
     try:
@@ -400,13 +350,6 @@ def _selected_model(payload: Any) -> str | None:
         return None
     model = option.get("model")
     return model if isinstance(model, str) and model else None
-
-
-def _redacted_headers(headers: Mapping[str, str]) -> dict[str, str]:
-    redacted: dict[str, str] = {}
-    for name, value in headers.items():
-        redacted[name] = "[REDACTED]" if name.strip().casefold() in SENSITIVE_HEADER_NAMES else value
-    return redacted
 
 
 def _pending_decision(

@@ -6,7 +6,7 @@ import json
 import threading
 import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -210,7 +210,6 @@ async def _handle_tui(
     available_models: list[str] | None = None,
     workspace: str | None = None,
     token_provider: TokenProvider | None = None,
-    route_headers: Mapping[str, str] | None = None,
     switch_message_fn: SwitchMessageFn | None = None,
 ) -> None:
     path = getattr(getattr(tui, "request", None), "path", "/") or "/"
@@ -230,7 +229,6 @@ async def _handle_tui(
                 prompt,
                 list(available_models or []),
                 log=log,
-                extra_headers=route_headers,
             )
 
     sess = _Session(
@@ -301,7 +299,6 @@ async def _serve(
     available_models: list[str] | None = None,
     workspace: str | None = None,
     token_provider: TokenProvider | None = None,
-    route_headers: Mapping[str, str] | None = None,
     switch_message_fn: SwitchMessageFn | None = None,
 ):
     async def handler(tui):
@@ -315,7 +312,6 @@ async def _serve(
                 available_models,
                 workspace,
                 token_provider,
-                route_headers,
                 switch_message_fn,
             )
         except Exception as exc:  # noqa: BLE001
@@ -335,7 +331,6 @@ def start_interposer_thread(
     available_models: list[str] | None = None,
     workspace: str | None = None,
     token_provider: TokenProvider | None = None,
-    route_headers: Mapping[str, str] | None = None,
     switch_message_fn: SwitchMessageFn | None = None,
     switch_message: str | None = None,
     log_path: Path | None = None,
@@ -369,7 +364,6 @@ def start_interposer_thread(
                     available_models,
                     workspace,
                     token_provider,
-                    route_headers,
                     switch_message_fn,
                 )
             )

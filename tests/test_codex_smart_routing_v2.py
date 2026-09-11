@@ -228,9 +228,6 @@ class TestLaunchCodex:
             "system.ai.glm-5-2",
         ]
         assert interposer_args["kwargs"]["workspace"] == WS
-        assert interposer_args["kwargs"]["route_headers"]["x-databricks-traffic-id"] == (
-            "testenv://liteswap/arnav-r315-task-v3"
-        )
         assert token_calls == [(WS, "myprof")]
         assert interposer_args["kwargs"]["token_provider"]() == "token-2"
         assert token_calls == [(WS, "myprof"), (WS, "myprof")]
@@ -569,7 +566,6 @@ class TestInterposerSession:
 def test_routing_request_uses_models_prompt_and_same_token(monkeypatch):
     monkeypatch.delenv("SMART_ROUTER_NAME", raising=False)
     captured = {}
-    logged = []
 
     def select_route(workspace, token, task, route_options, resolve, *, router_name, timeout):
         captured.update(
@@ -601,7 +597,6 @@ def test_routing_request_uses_models_prompt_and_same_token(monkeypatch):
             "system.ai.gpt-5-6-luna",
             "system.ai.glm-5-2",
         ],
-        log=logged.append,
     )
 
     assert reason is None
@@ -619,17 +614,3 @@ def test_routing_request_uses_models_prompt_and_same_token(monkeypatch):
             ("glm-5-2", "codex"),
         ],
     }
-    assert len(logged) == 1
-    assert logged[0].startswith(f"[ROUTE] request POST {WS}/ai-gateway/routing/v1/routes:select: ")
-    request_payload = json.loads(logged[0].split(": ", 1)[1])
-    assert request_payload == {
-        "route_options": [
-            {"model": "kimi-k3-neo", "harness": "codex"},
-            {"model": "gpt-5-6-sol", "harness": "codex"},
-            {"model": "gpt-5-6-luna", "harness": "codex"},
-            {"model": "glm-5-2", "harness": "codex"},
-        ],
-        "task": {"prompt": "Fix the parser"},
-        "route_selector": {"router_name": codex_routing.routing.ROUTER_NAME},
-    }
-    assert "same-oauth-token" not in logged[0]

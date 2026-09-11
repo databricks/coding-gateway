@@ -82,37 +82,6 @@ def test_routes_with_models_from_stored_state(monkeypatch):
     }
 
 
-def test_routes_select_forwards_gateway_headers_without_auth_override(monkeypatch):
-    captured = {}
-
-    def fake_urlopen(request, timeout):
-        captured["headers"] = {key.casefold(): value for key, value in request.headers.items()}
-        return _Response({"route_selection": [{"route_option": {"model": "gpt-5-6-sol"}}]})
-
-    monkeypatch.setattr(codex_routing.urllib.request, "urlopen", fake_urlopen)
-
-    decision, error = codex_routing.request_routing_decision(
-        WS,
-        "real-token",
-        "Fix the parser",
-        ["system.ai.gpt-5-6-sol"],
-        extra_headers={
-            "x-databricks-traffic-id": "testenv://liteswap/arnav-r315-task-v3",
-            "Authorization": "Bearer wrong-token",
-            "X-Ignored": "no",
-        },
-    )
-
-    assert error is None
-    assert decision is not None
-    assert captured["headers"]["authorization"] == "Bearer real-token"
-    assert (
-        captured["headers"]["x-databricks-traffic-id"]
-        == "testenv://liteswap/arnav-r315-task-v3"
-    )
-    assert "x-ignored" not in captured["headers"]
-
-
 def test_router_name_can_be_overridden_with_environment_variable(monkeypatch):
     captured = {}
     monkeypatch.setenv("SMART_ROUTER_NAME", "  custom_router  ")

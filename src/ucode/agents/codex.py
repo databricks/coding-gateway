@@ -29,6 +29,7 @@ from ucode.databricks import (
 from ucode.launcher import exec_or_spawn
 from ucode.managed_files import (
     OS,
+    ManagedFileWriteUnavailable,
     current_os,
     managed_file_conflicts,
     managed_file_is_verified,
@@ -463,13 +464,24 @@ def _reconcile_managed_config(state: dict, compose: Callable[[dict], dict]) -> N
             )
         mark_managed_file_verified(state, "codex", path, scope="local-compatible")
         return
-    reconcile_managed_file(
-        path,
-        tomlkit.dumps(desired_doc),
-        tool="codex",
-        display="Codex",
-        owned_paths=MANAGED_KEYS,
-    )
+    try:
+        reconcile_managed_file(
+            path,
+            tomlkit.dumps(desired_doc),
+            tool="codex",
+            display="Codex",
+            owned_paths=MANAGED_KEYS,
+        )
+    except ManagedFileWriteUnavailable:
+        conflicts = managed_file_conflicts(managed_before, desired_doc, MANAGED_KEYS)
+        if conflicts:
+            raise
+        print_warning_err(
+            f"Codex OS-managed settings could not be updated at {path}; continuing with local "
+            f"settings at {CODEX_CONFIG_PATH}."
+        )
+        mark_managed_file_verified(state, "codex", path, scope="local-compatible")
+        return
     mark_managed_file_verified(state, "codex", path)
 
 

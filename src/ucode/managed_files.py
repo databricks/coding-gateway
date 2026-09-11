@@ -36,6 +36,10 @@ ManagedParser = Callable[[str], dict]
 ManagedDumper = Callable[[dict], str]
 
 
+class ManagedFileWriteUnavailable(RuntimeError):
+    """The privileged managed-file write failed, so callers may use local settings if safe."""
+
+
 class OS(Enum):
     """The host OS families this module distinguishes, off `sys.platform`."""
 
@@ -269,13 +273,13 @@ def reconcile_managed_file(
         try:
             _sudo_replace(path, desired_text)
         except PermissionError as exc:
-            raise RuntimeError(
+            raise ManagedFileWriteUnavailable(
                 f"{display} cannot start because ucode could not update {path}: {exc}. "
                 "Run the ucode command from an interactive terminal and approve the administrator "
                 "prompt, or contact your administrator."
             ) from exc
         except subprocess.CalledProcessError as exc:
-            raise RuntimeError(_sudo_failure_message(path, display, exc)) from exc
+            raise ManagedFileWriteUnavailable(_sudo_failure_message(path, display, exc)) from exc
 
         written_text = read_managed_file(path)
         if written_text == desired_text:

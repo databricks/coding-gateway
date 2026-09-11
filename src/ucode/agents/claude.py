@@ -34,6 +34,7 @@ from ucode.databricks import (
 from ucode.launcher import exec_or_spawn
 from ucode.managed_files import (
     OS,
+    ManagedFileWriteUnavailable,
     current_os,
     managed_file_conflicts,
     managed_file_is_verified,
@@ -846,13 +847,24 @@ def _reconcile_managed_settings(
             )
         mark_managed_file_verified(state, "claude", path, scope="local-compatible")
         return
-    reconcile_managed_file(
-        path,
-        _dump_managed_settings(desired_settings),
-        tool="claude",
-        display="Claude Code",
-        owned_paths=owned_paths,
-    )
+    try:
+        reconcile_managed_file(
+            path,
+            _dump_managed_settings(desired_settings),
+            tool="claude",
+            display="Claude Code",
+            owned_paths=owned_paths,
+        )
+    except ManagedFileWriteUnavailable:
+        conflicts = managed_file_conflicts(managed_before, desired_settings, owned_paths)
+        if conflicts:
+            raise
+        print_warning(
+            f"Claude Code OS-managed settings could not be updated at {path}; continuing with "
+            f"local settings at {CLAUDE_SETTINGS_PATH}."
+        )
+        mark_managed_file_verified(state, "claude", path, scope="local-compatible")
+        return
     mark_managed_file_verified(state, "claude", path)
 
 

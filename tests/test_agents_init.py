@@ -387,6 +387,24 @@ class TestResolveProviderModels:
             "opus": "global.anthropic.claude-opus-4-8",
         }
 
+    def test_bedrock_ignores_gpt_targets(self, monkeypatch):
+        service = {
+            "provider_type": "amazon_bedrock",
+            "targets": [
+                "global.anthropic.claude-opus-4-8",
+                "openai.gpt-oss-120b-1:0",
+            ],
+        }
+        self._patch(monkeypatch, service, None)
+
+        models, error, relayed = agents_mod.resolve_provider_models(
+            "claude", self._STATE, "main.b.mixed"
+        )
+
+        assert error is None
+        assert models == {"opus": "global.anthropic.claude-opus-4-8"}
+        assert relayed is False
+
     def test_invalid_provider_returns_error(self, monkeypatch):
         self._patch(monkeypatch, None, "boom")
         models, error, relayed = agents_mod.resolve_provider_models(

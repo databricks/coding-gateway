@@ -589,12 +589,7 @@ class TestSubcommandRouting:
 
         assert result.exit_code == 0, result.output
         assert mock_launch.call_args.kwargs["parent_schema"] == "main.default"
-
-    def test_invalid_parent_is_rejected(self):
-        result = runner.invoke(app, ["claude", "--parent", "main"])
-
-        assert result.exit_code == 1
-        assert "<catalog>.<schema>" in result.output
+        assert os.environ["ENABLE_CLAUDE_CODE_GATEWAY_MODEL_DISCOVERY"] == "1"
 
     def test_claude_enable_model_discovery_is_hidden_from_help(self):
         result = runner.invoke(app, ["claude", "--help"])

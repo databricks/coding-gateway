@@ -128,6 +128,7 @@ from ucode.state import (
     set_current_workspace,
     set_provider_service,
 )
+from ucode.string_utils import is_valid_catalog_schema
 from ucode.tracing import configure_tracing_command
 from ucode.ui import (
     console,
@@ -1970,13 +1971,8 @@ def _launch_tool(
 ) -> None:
     try:
         tool = normalize_tool(tool_name)
-        if parent_schema is not None:
-            parts = parent_schema.split(".")
-            if len(parts) != 2 or any(
-                not part or any(ch in " /" or ord(ch) < 32 or ord(ch) == 127 for ch in part)
-                for part in parts
-            ):
-                raise RuntimeError("--parent must be `<catalog>.<schema>`.")
+        if parent_schema is not None and not is_valid_catalog_schema(parent_schema):
+            raise RuntimeError("--parent must be `<catalog>.<schema>`.")
         explicit_prompt = _has_explicit_prompt(ctx)
         smart_routing_enabled = smart_routing_v2.enabled()
         # Launchers such as isaac put their harness arguments after `--`, so the harness's own
@@ -2588,7 +2584,7 @@ def claude_cmd(
         claude_agent.disable_smart_routing(load_state())
         print_success("Claude Code smart routing disabled; ug routing hooks removed")
         return
-    if enable_model_discovery:
+    if enable_model_discovery or (parent is not None and provider is None):
         os.environ[claude_agent.GATEWAY_MODEL_DISCOVERY_ENV_VAR] = "1"
     with _smart_routing_v2_flag(enable_smart_routing_flag):
         _launch_tool(

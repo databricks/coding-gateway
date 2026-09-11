@@ -21,6 +21,7 @@ from ucode.config_io import (
     read_toml_safe,
     write_toml_file,
 )
+from ucode.constants import MODEL_SERVICE_ROUTING_HEADER_NAMES
 from ucode.custom_oauth import CustomOAuthConfig, build_custom_auth_token_argv
 from ucode.databricks import (
     build_auth_token_argv,
@@ -40,6 +41,7 @@ from ucode.managed_files import (
     reconcile_managed_file,
     revert_managed_file,
 )
+from ucode.model_service_headers import model_service_routing_headers
 from ucode.smart_routing import v2 as smart_routing_v2
 from ucode.smart_routing.codex_hooks import (
     remove_smart_routing_hooks,
@@ -60,7 +62,10 @@ CODEX_BACKUP_PATH = APP_DIR / "codex-ucode-config.backup.toml"
 LEGACY_CODEX_CONFIG_PATH = CODEX_CONFIG_DIR / "config.toml"
 LEGACY_CODEX_BACKUP_PATH = APP_DIR / "codex-config.backup.toml"
 CODEX_MODEL_PROVIDER_NAME = "ucode-databricks"
-MODEL_SERVICE_PARENT_SCHEMA_HEADER = "Databricks-Model-Service-Parent-Schema"
+_MODEL_SERVICE_ROUTING_KEY_PATHS = [
+    ["model_providers", CODEX_MODEL_PROVIDER_NAME, "http_headers", name]
+    for name in MODEL_SERVICE_ROUTING_HEADER_NAMES
+]
 MINIMUM_CODEX_VERSION = (0, 134, 0)
 MINIMUM_CODEX_VERSION_TEXT = "0.134.0"
 MINIMUM_ROUTING_CODEX_VERSION = (0, 145, 0)
@@ -160,12 +165,7 @@ def _provider_block(
     http_headers = {
         "User-Agent": f"ucode/{ucode_version()} codex/{agent_version('codex')}",
     }
-    # Route to an external Model Provider Service; the gateway selects the
-    # provider from this header on every request.
-    if provider:
-        http_headers["Databricks-Model-Provider-Service"] = provider
-    elif parent_schema:
-        http_headers[MODEL_SERVICE_PARENT_SCHEMA_HEADER] = parent_schema
+    http_headers.update(model_service_routing_headers(provider, parent_schema))
     return {
         "name": "Databricks AI Gateway",
         "base_url": base_url,
@@ -358,6 +358,7 @@ def write_tool_config(
             custom_oauth=state.get("custom_oauth"),
         )
         doc = read_toml_safe(LEGACY_CODEX_CONFIG_PATH)
+        prune_key_paths(doc, _MODEL_SERVICE_ROUTING_KEY_PATHS)
         deep_merge_dict(doc, overlay)
         # deep_merge can't drop keys, so clear model preferences from an earlier run.
         profiles = doc.get("profiles")
@@ -368,18 +369,6 @@ def write_tool_config(
         ):
             for key in ("model", "model_reasoning_effort"):
                 profiles[CODEX_PROFILE_NAME].pop(key, None)
-        if parent_schema is None:
-            prune_key_paths(
-                doc,
-                [
-                    [
-                        "model_providers",
-                        CODEX_MODEL_PROVIDER_NAME,
-                        "http_headers",
-                        MODEL_SERVICE_PARENT_SCHEMA_HEADER,
-                    ]
-                ],
-            )
         write_toml_file(LEGACY_CODEX_CONFIG_PATH, doc)
         state = mark_tool_managed(state, "codex", LEGACY_MANAGED_KEYS)
         save_state(state)
@@ -398,15 +387,12 @@ def write_tool_config(
     )
 
     def compose(base: dict) -> dict:
+        prune_key_paths(base, _MODEL_SERVICE_ROUTING_KEY_PATHS)
         deep_merge_dict(base, copy.deepcopy(overlay))
         # deep_merge can't drop keys, so clear model preferences from an earlier run.
         if chosen_model is None:
             for key in ("model", "model_reasoning_effort"):
                 base.pop(key, None)
-        if parent_schema is None:
-            base["model_providers"][CODEX_MODEL_PROVIDER_NAME]["http_headers"].pop(
-                MODEL_SERVICE_PARENT_SCHEMA_HEADER, None
-            )
         return base
 
     doc = read_toml_safe(CODEX_CONFIG_PATH)

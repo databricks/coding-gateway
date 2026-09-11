@@ -238,7 +238,7 @@ class TestCodexWriteConfig:
         headers = doc["model_providers"]["ucode-databricks"]["http_headers"]
         assert headers["Databricks-Model-Provider-Service"] == "main.aarushi.aarushi-openai"
 
-    def test_removes_stale_parent_header(self, tmp_path, monkeypatch):
+    def test_replaces_stale_routing_headers(self, tmp_path, monkeypatch):
         config_path = tmp_path / ".codex" / "ucode.config.toml"
         monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", config_path)
         monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", tmp_path / "backup.toml")
@@ -246,13 +246,20 @@ class TestCodexWriteConfig:
         monkeypatch.setattr(codex, "save_state", lambda state: None)
         state = {"workspace": WS, "codex_models": []}
 
+        codex.write_tool_config(state, provider="main.default.openai")
         codex.write_tool_config(state, parent_schema="main.default")
+
+        headers = read_toml_safe(config_path)["model_providers"]["ucode-databricks"]["http_headers"]
+        assert headers["Databricks-Model-Service-Parent-Schema"] == "main.default"
+        assert "Databricks-Model-Provider-Service" not in headers
+
         codex.write_tool_config(state)
 
         headers = read_toml_safe(config_path)["model_providers"]["ucode-databricks"]["http_headers"]
         assert "Databricks-Model-Service-Parent-Schema" not in headers
+        assert "Databricks-Model-Provider-Service" not in headers
 
-    def test_legacy_removes_stale_parent_header(self, tmp_path, monkeypatch):
+    def test_legacy_replaces_stale_routing_headers(self, tmp_path, monkeypatch):
         config_dir = tmp_path / ".codex"
         legacy_path = config_dir / "config.toml"
         monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", config_dir / "ucode.config.toml")
@@ -263,13 +270,17 @@ class TestCodexWriteConfig:
         monkeypatch.setattr(codex, "save_state", lambda state: None)
         state = {"workspace": WS, "codex_models": []}
 
+        codex.write_tool_config(state, provider="main.default.openai")
         codex.write_tool_config(state, parent_schema="main.default")
+
         headers = read_toml_safe(legacy_path)["model_providers"]["ucode-databricks"]["http_headers"]
         assert headers["Databricks-Model-Service-Parent-Schema"] == "main.default"
+        assert "Databricks-Model-Provider-Service" not in headers
 
         codex.write_tool_config(state)
         headers = read_toml_safe(legacy_path)["model_providers"]["ucode-databricks"]["http_headers"]
         assert "Databricks-Model-Service-Parent-Schema" not in headers
+        assert "Databricks-Model-Provider-Service" not in headers
 
     def test_clears_profile_model_preferences_before_launch(self, tmp_path, monkeypatch):
         config_path = tmp_path / ".codex" / "ucode.config.toml"

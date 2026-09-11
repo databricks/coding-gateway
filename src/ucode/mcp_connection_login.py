@@ -19,6 +19,7 @@ needed. Requires the CLI ``--resource`` flag (databricks/cli#6621).
 from __future__ import annotations
 
 import subprocess
+import sys
 
 # AI Gateway MCP service endpoints look like
 # ``https://<ws>/ai-gateway/mcp-services/<catalog>.<schema>.<service>``.
@@ -58,8 +59,13 @@ def run_connection_login(
     it is sent as ``--resource`` so a resource-aware ``/oidc`` drives the
     connection's SaaS login before issuing the token. Uses the Databricks CLI's
     own default client, whose loopback redirect is already registered — no
-    ``--client-id`` needed. Returns ``(ok, message)``; ``message`` is the CLI's
-    own output on failure so the caller can surface it.
+    ``--client-id`` needed.
+
+    The CLI opens the browser to complete the login and prints the authorize URL.
+    We route its output to **stderr** (never stdout — that is the proxy's MCP
+    JSON-RPC wire), so a coding agent surfaces it in the server's log and the URL
+    stays visible when the browser can't open (e.g. a headless remote). Returns
+    ``(ok, message)``; on failure ``message`` points at that log.
     """
     argv = [
         login_binary,
@@ -72,22 +78,35 @@ def run_connection_login(
     ]
     if profile:
         argv += ["--profile", profile]
+    connection = connection_from_url(resource_url) or resource_url
+    print(
+        f"ucode mcp-proxy: '{connection}' needs a one-time connection sign-in. Opening your "
+        "browser to complete it — if it doesn't open, use the authorization URL printed below.",
+        file=sys.stderr,
+        flush=True,
+    )
     try:
+        # stdout -> stderr: the CLI's prompts and authorize URL reach the agent's
+        # MCP log (fd 2) without corrupting this process's stdout (fd 1, the MCP
+        # JSON-RPC stream). stdin is closed since the flow is browser-driven.
         result = subprocess.run(
             argv,
             check=False,
-            capture_output=True,
-            text=True,
             timeout=_LOGIN_TIMEOUT_SECONDS,
+            stdin=subprocess.DEVNULL,
+            stdout=sys.stderr,
+            stderr=sys.stderr,
         )
     except OSError as exc:
         return False, f"could not run '{login_binary} auth login': {exc}"
     except subprocess.TimeoutExpired:
-        return False, "login timed out waiting for the browser flow to complete"
+        return False, "connection sign-in timed out waiting for the browser flow to complete"
     if result.returncode == 0:
         return True, "signed in"
-    detail = (result.stderr or result.stdout or "").strip()
-    return False, detail or f"login exited with code {result.returncode}"
+    return (
+        False,
+        f"connection sign-in did not complete (CLI exited {result.returncode}; see the log above)",
+    )
 
 
 __all__ = [

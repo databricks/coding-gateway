@@ -51,13 +51,29 @@ class TestRunConnectionLogin:
         # Uses the CLI's default client (its own registered redirect), so no --client-id.
         assert "--client-id" not in argv
 
-    def test_failure_returns_cli_detail(self, monkeypatch):
+    def test_nonzero_exit_reports_failure(self, monkeypatch):
+        # The CLI's own output streams live to stderr (the agent's MCP log), so on
+        # failure we return a pointer to that log rather than captured text.
         captured: list[list[str]] = []
-        monkeypatch.setattr(
-            mcl.subprocess, "run", self._fake_run(captured, returncode=1, stderr="nope")
-        )
+        monkeypatch.setattr(mcl.subprocess, "run", self._fake_run(captured, returncode=1))
         ok, message = mcl.run_connection_login(AIGW_URL, WS)
-        assert not ok and message == "nope"
+        assert not ok
+        assert "did not complete" in message and "1" in message
+
+    def test_output_is_routed_to_stderr_not_stdout(self, monkeypatch):
+        # stdout must never be captured to the proxy's stdout (the MCP wire); the
+        # CLI's URL/prompts go to this process's stderr.
+        seen: dict = {}
+        monkeypatch.setattr(
+            mcl.subprocess,
+            "run",
+            lambda argv, **kw: seen.update(kw) or subprocess.CompletedProcess(argv, 0),
+        )
+        ok, _ = mcl.run_connection_login(AIGW_URL, WS)
+        assert ok
+        assert seen.get("stdout") is mcl.sys.stderr
+        assert seen.get("stderr") is mcl.sys.stderr
+        assert "capture_output" not in seen
 
     def test_timeout_is_reported(self, monkeypatch):
         def _run(argv, **kwargs):

@@ -39,6 +39,7 @@ from types import ModuleType, TracebackType
 from typing import Protocol, Self
 
 import anyio
+from anyio.to_thread import run_sync
 from mcp.client.streamable_http import streamable_http_client
 from mcp.server.stdio import stdio_server
 
@@ -124,7 +125,12 @@ def _build_token_auth(workspace: str, profile: str | None, url: str):
     the per-user connection credential is missing. We drive the connection login
     once (browser, via ``run_connection_login`` -> ``databricks auth login
     --resource``) and retry with a fresh token, so the coding agent just sees the
-    request authenticate and succeed rather than a failed ``tools/list``."""
+    request authenticate and succeed rather than a failed ``tools/list``.
+
+    The proxy runs on an async event loop, so the login (a blocking subprocess
+    that waits on the browser) is offloaded to a worker thread in
+    ``async_auth_flow`` — the loop keeps servicing the stdio pumps and stays
+    cancellable while the user completes the browser flow, instead of freezing."""
     httpx = _httpx()
     connection = connection_from_url(url)
 
@@ -141,21 +147,37 @@ def _build_token_auth(workspace: str, profile: str | None, url: str):
             raise ProxyAuthError(str(exc)) from exc
         request.headers["Authorization"] = f"Bearer {token}"
 
+    def _login_and_remint(request):
+        # Blocking: drives the browser login, then re-mints the now-valid bearer.
+        ok, detail = run_connection_login(url, workspace, profile=profile)
+        if not ok:
+            raise ProxyAuthError(f"connection login for '{connection}' failed: {detail}")
+        _mint_bearer(request)
+
+    def _needs_login(response) -> bool:
+        # Only connection-backed services have a per-user login to drive; a 401 from
+        # anything else is a real auth failure, left to surface as-is.
+        return connection is not None and response.status_code == 401
+
     class _DatabricksTokenAuth(httpx.Auth):
+        # Async is the real path (the proxy uses an AsyncClient); the sync flow is
+        # kept for completeness/parity. Both share the same decision + login logic.
         def auth_flow(self, request):
             _mint_bearer(request)
             response = yield request
-            # Only connection-backed services have a per-user login to drive; a 401
-            # from anything else is a real auth failure, left to surface as-is.
-            if connection is None or response.status_code != 401:
+            if not _needs_login(response):
                 return
-            # Blocks this proxy while the browser login runs — acceptable, since the
-            # agent is only waiting on this one connect; the CLI runs its own
-            # callback listener out of process.
-            ok, detail = run_connection_login(url, workspace, profile=profile)
-            if not ok:
-                raise ProxyAuthError(f"connection login for '{connection}' failed: {detail}")
+            _login_and_remint(request)
+            yield request
+
+        async def async_auth_flow(self, request):
             _mint_bearer(request)
+            response = yield request
+            if not _needs_login(response):
+                return
+            # Offload the blocking browser login so the event loop keeps running
+            # (mcp-remote-style: the transport stays responsive, not frozen).
+            await run_sync(lambda: _login_and_remint(request))
             yield request
 
     return _DatabricksTokenAuth()

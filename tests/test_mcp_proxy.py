@@ -206,6 +206,37 @@ class TestConnectionLoginOn401:
         assert len(yielded) == 1  # no retry
         assert logins == []
 
+    def test_async_flow_offloads_login_and_retries(self, monkeypatch):
+        # The real path is async (AsyncClient). async_auth_flow must offload the
+        # blocking login to a worker thread and retry with a fresh token.
+        tokens = iter(["stale", "fresh"])
+        monkeypatch.setattr(mcp_proxy, "get_databricks_token", lambda ws, profile: next(tokens))
+        calls: list[tuple] = []
+        monkeypatch.setattr(
+            mcp_proxy,
+            "run_connection_login",
+            lambda url, ws, **k: calls.append((url, k.get("profile"))) or (True, "signed in"),
+        )
+        auth = mcp_proxy._build_token_auth(WS, "p", CONN_URL)
+
+        async def scenario():
+            # The flow mutates one request object in place, so capture the header
+            # value at each yield rather than comparing object references.
+            req = httpx.Request("POST", CONN_URL)
+            gen = auth.async_auth_flow(req)
+            await gen.__anext__()
+            first_auth = req.headers["Authorization"]
+            await gen.asend(_response(401))
+            retry_auth = req.headers["Authorization"]
+            with pytest.raises(StopAsyncIteration):
+                await gen.asend(_response(200))
+            return first_auth, retry_auth
+
+        first_auth, retry_auth = anyio.run(scenario)
+        assert calls == [(CONN_URL, "p")]  # login fired (offloaded), once
+        assert first_auth == "Bearer stale"
+        assert retry_auth == "Bearer fresh"
+
 
 class TestPump:
     def test_forwards_all_messages_in_order(self):

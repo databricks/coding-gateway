@@ -406,6 +406,62 @@ class TestServe:
         assert started == []  # never opened the bridge
         assert "no personal access token" in capsys.readouterr().err
 
+    def test_connect_time_login_runs_before_the_bridge_when_required(self, monkeypatch):
+        order: list = []
+        monkeypatch.setattr(mcp_proxy, "_preflight_token", lambda ws, profile: None)
+        monkeypatch.setattr(mcp_proxy, "_connection_login_required", lambda url, ws, profile: True)
+        monkeypatch.setattr(
+            mcp_proxy,
+            "run_connection_login",
+            lambda url, ws, **k: order.append(("login", url)) or (True, "signed in"),
+        )
+        monkeypatch.setattr(mcp_proxy.anyio, "run", lambda func, *args: order.append(("bridge",)))
+
+        mcp_proxy.serve(CONN_URL, WS, "p")
+
+        # Login (during "connecting…") happens before the bridge opens.
+        assert order == [("login", CONN_URL), ("bridge",)]
+
+    def test_authenticated_connection_skips_connect_time_login(self, monkeypatch):
+        logins: list = []
+        monkeypatch.setattr(mcp_proxy, "_preflight_token", lambda ws, profile: None)
+        monkeypatch.setattr(mcp_proxy, "_connection_login_required", lambda url, ws, profile: False)
+        monkeypatch.setattr(
+            mcp_proxy, "run_connection_login", lambda *a, **k: logins.append(1) or (True, "")
+        )
+        monkeypatch.setattr(mcp_proxy.anyio, "run", lambda func, *args: None)
+
+        mcp_proxy.serve(CONN_URL, WS, "p")
+
+        assert logins == []  # already authenticated -> no login
+
+    def test_connect_time_login_failure_is_terminal(self, monkeypatch):
+        started: list = []
+        monkeypatch.setattr(mcp_proxy, "_preflight_token", lambda ws, profile: None)
+        monkeypatch.setattr(mcp_proxy, "_connection_login_required", lambda url, ws, profile: True)
+        monkeypatch.setattr(
+            mcp_proxy, "run_connection_login", lambda *a, **k: (False, "user cancelled")
+        )
+        monkeypatch.setattr(mcp_proxy.anyio, "run", lambda func, *args: started.append("bridge"))
+
+        with pytest.raises(SystemExit):
+            mcp_proxy.serve(CONN_URL, WS, "p")
+
+        assert started == []  # never opened the bridge
+
+    def test_use_pat_skips_the_connect_time_probe(self, monkeypatch):
+        probed: list = []
+        monkeypatch.setattr(mcp_proxy, "ensure_pat_bearer", lambda profile: True)
+        monkeypatch.setattr(mcp_proxy, "_preflight_token", lambda ws, profile: None)
+        monkeypatch.setattr(
+            mcp_proxy, "_connection_login_required", lambda *a: probed.append(1) or True
+        )
+        monkeypatch.setattr(mcp_proxy.anyio, "run", lambda func, *args: None)
+
+        mcp_proxy.serve(CONN_URL, WS, "p", use_pat=True)
+
+        assert probed == []  # PAT has no connection OAuth to probe/drive
+
     def test_oauth_path_never_touches_pat(self, monkeypatch):
         # Without use_pat, ensure_pat_bearer must not be consulted at all.
         called: list[str] = []

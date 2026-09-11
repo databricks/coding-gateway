@@ -249,6 +249,57 @@ def _preflight_token(workspace: str, profile: str | None) -> None:
     get_databricks_token(workspace, profile)
 
 
+# Timeout for the startup probe MCP round-trips (initialize + tools/list). Short:
+# it's a liveness check, not the login (which has its own generous timeout).
+_PROBE_TIMEOUT_SECONDS = 15
+
+
+def _connection_login_required(url: str, workspace: str, profile: str | None) -> bool:
+    """Whether the connection-backed MCP service answers ``tools/list`` with a 401.
+
+    A lightweight probe run at startup (before the bridge) so the connection login
+    happens during the agent's "connecting…" phase — like a generic OAuth MCP
+    bridge — instead of on the agent's first ``tools/list``, where it would race
+    the agent's tool-fetch timeout. Any non-401 outcome (authenticated, or a
+    network/transport hiccup) returns ``False`` so startup is never blocked on a
+    false alarm; a genuine missing credential surfaces again on the live request."""
+    httpx = _httpx()
+    try:
+        token = get_databricks_token(workspace, profile)
+    except RuntimeError:
+        return False  # dead databricks auth; let _preflight_token/the bridge report it
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+    initialize = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "ucode-mcp-proxy", "version": "0"},
+        },
+    }
+    try:
+        with httpx.Client(timeout=_PROBE_TIMEOUT_SECONDS) as client:
+            init_response = client.post(url, headers=headers, json=initialize)
+            session_id = init_response.headers.get("mcp-session-id")
+            if session_id:
+                headers["mcp-session-id"] = session_id
+            client.post(
+                url, headers=headers, json={"jsonrpc": "2.0", "method": "notifications/initialized"}
+            )
+            tools = client.post(
+                url, headers=headers, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
+            )
+            return tools.status_code == 401
+    except httpx.HTTPError:
+        return False
+
+
 def _unwrap_proxy_error(exc: BaseException) -> ProxyAuthError | ProxyTransportError | None:
     """Find a known proxy error in an exception (or ExceptionGroup) tree.
 
@@ -288,6 +339,20 @@ def serve(url: str, workspace: str, profile: str | None = None, *, use_pat: bool
         _preflight_token(workspace, profile)
     except RuntimeError as exc:
         _fail_fast(str(exc))
+
+    # Connect-time connection login (generic OAuth-bridge behaviour): before the
+    # bridge starts, if a connection-backed service is unauthenticated, drive the
+    # login now — while the agent shows "connecting…" — so the session comes up
+    # already connected instead of failing the agent's first tools/list. The
+    # browser opens (databricks-cli honours $BROWSER, inherited here) or the
+    # authorize URL is printed to this stderr. PAT profiles have no connection
+    # OAuth to drive. The on-401 retry in the auth hook remains as a mid-session
+    # fallback (e.g. the credential is revoked while connected).
+    connection = None if use_pat else connection_from_url(url)
+    if connection is not None and _connection_login_required(url, workspace, profile):
+        ok, detail = run_connection_login(url, workspace, profile=profile)
+        if not ok:
+            _fail_fast(f"connection login for '{connection}' failed: {detail}")
 
     try:
         anyio.run(_run, url, workspace, profile)
